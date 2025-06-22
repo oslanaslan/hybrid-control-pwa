@@ -1,3 +1,3 @@
 #pragma once
 
-constexpr auto kDeclareExists = true;
+#include <float.hpp>

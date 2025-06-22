@@ -24,7 +24,7 @@ foreach(TEST_DIR ${SUBDIRS})
       )
       add_executable(${TEST_TARGET} ${TEST_SRC_FILES})
       message("Test target: ${TEST_NAME}")
-      target_compile_features(${TEST_TARGET} PUBLIC cxx_std_20)
+      target_compile_features(${TEST_TARGET} PUBLIC cxx_std_23)
       set_target_properties(${TEST_TARGET} PROPERTIES CXX_EXTENSIONS OFF)
       
       target_include_directories(${TEST_TARGET} PUBLIC ${CMAKE_CURRENT_LIST_DIR})

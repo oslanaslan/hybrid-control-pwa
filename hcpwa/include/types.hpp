@@ -9,6 +9,10 @@ namespace hcpwa {
 template <int N>
 using Vec = linalg::vec<hcpwa::Float, N>;
 
+constexpr Float modulo(const Vec<2>& v) {  // NOLINT
+  return v.x * v.x + v.y * v.y;
+}
+
 // Format x*x + y*y + z = 0
 template <int N>
 using Line = Vec<N + 1>;

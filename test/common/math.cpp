@@ -15,6 +15,33 @@ TEST(math, vec) {
   ASSERT_EQ(a + b, c);
 }
 
+TEST(math, floating) {
+  auto test = []<typename T>(T) {
+    T a = 1;
+    ASSERT_EQ(a, 1);
+    T b = 2;
+    T c = a + b;
+    ASSERT_GE(c, a);
+    ASSERT_GE(c, b);
+    ASSERT_LT(a, b);
+    auto x = c + a;
+    auto y = c - a;
+    static_assert(std::same_as<decltype(x), T>);
+    static_assert(std::same_as<decltype(y), T>);
+
+    float m = 1.5;
+    a += m;
+    b -= m;
+    c = m + a;
+    c = m - b;
+    c = m + 1;
+  };
+  test(float{0});
+  test(double{0});
+  test(hcpwa::CustomFloat<float>(0));
+  test(hcpwa::CustomFloat<double>(0));
+}
+
 TEST(math, split) {
   GlobalInit();
   defer _ = &GlobalFree;
@@ -25,6 +52,44 @@ TEST(math, split) {
       {0, 1, -0.2},
   };
   auto polygons = hcpwa::SplitAABBWithLines(aabb, lines);
+
+  ASSERT_EQ(polygons.size(), 7) << tu::PrettyPrint(polygons);
+
+  const std::size_t triangle_count
+      = std::ranges::count_if(polygons, [](const hcpwa::PolygonResolution& p) {
+          return p.polygon.size() == 3;
+        });
+  const std::size_t quad_count
+      = std::ranges::count_if(polygons, [](const hcpwa::PolygonResolution& p) {
+          return p.polygon.size() == 4;
+        });
+
+  ASSERT_EQ(triangle_count, 4);
+  ASSERT_EQ(quad_count, 3);
+}
+
+TEST(math, normalize) {
+  GlobalInit();
+  defer _ = &GlobalFree;
+  hcpwa::AABB<2> aabb = {{0, 0}, {1, 1}};
+  hcpwa::LineSet<2> lines = {
+      {1, 1, -1},
+      {1, -1, 0},
+      {0, 1, -0.2},
+      {1, 0, -0.999},
+  };
+  auto polygons = hcpwa::SplitAABBWithLines(aabb, lines);
+
+  ASSERT_EQ(polygons.size(), 11) << tu::PrettyPrint(polygons);
+
+  using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Vec<2>, 0.01f>;
+  hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
+  pool.Unique(aabb.first);
+  pool.Unique(aabb.second);
+  pool.Unique({aabb.first.x, aabb.second.y});
+  pool.Unique({aabb.second.x, aabb.first.y});
+
+  hcpwa::NormalizeVertices(polygons, pool);
 
   ASSERT_EQ(polygons.size(), 7) << tu::PrettyPrint(polygons);
 

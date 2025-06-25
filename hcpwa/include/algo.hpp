@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <types.hpp>
 #include "uniqie_pool.hpp"
 
@@ -9,4 +10,7 @@ std::vector<hcpwa::PolygonResolution> SplitAABBWithLines(
 
 void NormalizeVertices(std::vector<hcpwa::PolygonResolution>& data,
                        hcpwa::UniquePool<hcpwa::Vec<2>>& pool);
+
+std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
+    const std::span<hcpwa::PolygonResolution>& data);
 }  // namespace hcpwa

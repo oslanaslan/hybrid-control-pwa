@@ -105,3 +105,29 @@ TEST(math, normalize) {
   ASSERT_EQ(triangle_count, 4);
   ASSERT_EQ(quad_count, 3);
 }
+
+TEST(math, triangulate) {
+  std::vector<hcpwa::PolygonResolution> data
+      = {hcpwa::PolygonResolution{.polygon = {
+                                      {0, 0},
+                                      {0, 1},
+                                      {1, 1},
+                                      {1, 0},
+                                  },
+                                },
+                              hcpwa::PolygonResolution{.polygon = {
+                                      {0, 0},
+                                      {0, 2},
+                                      {2, 2},
+                                      {2, 0},
+                                  },
+                                }};
+
+  auto tri = hcpwa::Triangulate(data);
+
+  ASSERT_EQ(tri.size(), 4);
+  ASSERT_EQ(tri[0].second, 0);
+  ASSERT_EQ(tri[1].second, 0);
+  ASSERT_EQ(tri[2].second, 1);
+  ASSERT_EQ(tri[3].second, 1);
+}

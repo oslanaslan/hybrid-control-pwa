@@ -30,4 +30,8 @@ struct PolygonResolution {
 template <int N>
 using AABB = std::pair<Vec<N>, Vec<N>>;
 
+struct Triangle {
+  Vec<2> a, b, c;
+};
+
 }  // namespace hcpwa

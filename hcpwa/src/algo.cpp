@@ -78,4 +78,20 @@ void NormalizeVertices(std::vector<hcpwa::PolygonResolution>& data,
     }
   }
 }
+
+std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
+    const std::span<hcpwa::PolygonResolution>& data) {
+  using IndexedTriangle = std::pair<Triangle, std::size_t>;
+  std::vector<IndexedTriangle> result;
+
+  for (std::size_t i = 0; i < data.size(); i++) {
+    const auto& poly = data[i].polygon;
+    const auto& a = poly[0];
+    for (std::size_t j = 2; j < poly.size(); j++) {
+      result.emplace_back(Triangle{.a = a, .b = poly[j - 1], .c = poly[j]}, i);
+    }
+  }
+  return result;
+}
+
 }  // namespace hcpwa

@@ -13,4 +13,21 @@ constexpr Vec<N> Promote(const Vec<M>& v, const std::array<int, M>& pos) {
   return result;
 }
 
+template <int N>
+hcpwa::LineSet<N> AABBBounds(const AABB<N>& aabb) {
+  hcpwa::LineSet<N> result;
+  result.reserve(2 * N);
+  for (int i = 0; i < N; i++) {
+    hcpwa::Line<N> near(0);
+    hcpwa::Line<N> far(0);
+    far[i] = 1;
+    far[N] = -aabb.second[i];
+    near[i] = -1;
+    near[N] = aabb.first[i];
+    result.push_back(near);
+    result.push_back(far);
+  }
+  return result;
+}
+
 }  // namespace hcpwa

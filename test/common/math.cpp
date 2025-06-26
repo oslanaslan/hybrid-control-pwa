@@ -3,8 +3,10 @@
 #include <types.hpp>
 #include "algo.hpp"
 #include "cddwrap/cdd.hpp"
+#include "morph.hpp"
 #include "utility.hpp"
 #include "test_utils.hpp"
+#include <ranges>
 
 TEST(math, vec) {
   hcpwa::Vec<2> a{1, 2};
@@ -166,4 +168,25 @@ TEST(math, prism2) {
   ASSERT_TRUE(hcpwa::Apply(prism[0], outside) > 0
               || hcpwa::Apply(prism[1], outside) > 0
               || hcpwa::Apply(prism[2], outside) > 0);
+}
+
+TEST(math, hull8d) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  hcpwa::Triangle triangle = {{0, 0}, {0, 1}, {1, 0}};
+  auto prism = hcpwa::CalcPrism(triangle, {0, 2});
+
+  ASSERT_EQ(prism.size(), 3);
+
+  const hcpwa::AABB<8> aabb{{0, 0, 0, 0, 0, 0, 0, 0}, {1, 1, 1, 1, 1, 1, 1, 1}};
+  auto aabb_lines = hcpwa::AABBBounds(aabb);
+
+  for (auto& v : prism) {
+    aabb_lines.push_back(v);
+  }
+
+  auto points = hcpwa::LinesToPoints(aabb_lines);
+
+  ASSERT_EQ(points.size(), 192);
 }

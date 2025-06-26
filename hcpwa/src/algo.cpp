@@ -94,8 +94,8 @@ std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
   return result;
 }
 
-std::vector<hcpwa::Line<8>> CalcPrism(const Triangle& triangle,
-                                      const std::array<int, 2>& dims) {
+hcpwa::LineSet<8> CalcPrism(const Triangle& triangle,
+                            const std::array<int, 2>& dims) {
   std::vector<hcpwa::Line<8>> result;
   {
     hcpwa::Line<2> line
@@ -120,6 +120,27 @@ std::vector<hcpwa::Line<8>> CalcPrism(const Triangle& triangle,
       line = -line;
     }
     result.push_back(hcpwa::Promote<9>(line, {dims[0], dims[1], 8}));
+  }
+  return result;
+}
+
+std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data) {
+  cddwrap::matrix<double> inequalities(9, data.size());
+  for (int i = 0; i < data.size(); i++) {
+    for (int j = 0; j < 8; j++) {
+      inequalities[i][j] = (double)data[i][j];
+    }
+    inequalities[i][8] = -(double)data[i][8];
+  }
+
+  auto points = GetHullPoints(inequalities);
+  if (points.rows() < 8) {
+    return {};
+  }
+  std::vector<hcpwa::Vec<8>> result;
+  for (std::size_t i = 0; i < points.rows(); i++) {
+    result.emplace_back(points[i, 0], points[i, 1], points[i, 2], points[i, 3],
+                        points[i, 4], points[i, 5], points[i, 6], points[i, 7]);
   }
   return result;
 }

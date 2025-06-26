@@ -1,8 +1,13 @@
-#include <cdd.hpp>
-#include <lineareq.hpp>
+#include <cddwrap/cdd.hpp>
+#include <cddwrap/lineareq.hpp>
 #include <string>
 #include <stdexcept>
 #include <utility.hpp>
+
+#include <setoper.h>
+#include <cddmp.h>
+#include <cdd.h>
+
 namespace cddwrap {
 matrix<double> GetHullPoints(const matrix<double>& inequalities) {
   dd_MatrixPtr m = dd_CreateMatrix(inequalities.rows(), inequalities.cols());
@@ -58,4 +63,4 @@ matrix<double> GetHullPoints(const matrix<double>& inequalities) {
   }
   return result;
 }
-}
+}  // namespace cddwrap

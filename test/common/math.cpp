@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <types.hpp>
 #include "algo.hpp"
-#include "cdd.hpp"
+#include "cddwrap/cdd.hpp"
 #include "utility.hpp"
 #include "test_utils.hpp"
 
@@ -43,8 +43,8 @@ TEST(math, floating) {
 }
 
 TEST(math, split) {
-  GlobalInit();
-  defer _ = &GlobalFree;
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
   hcpwa::AABB<2> aabb = {{0, 0}, {1, 1}};
   hcpwa::LineSet<2> lines = {
       {1, 1, -1},
@@ -69,8 +69,8 @@ TEST(math, split) {
 }
 
 TEST(math, normalize) {
-  GlobalInit();
-  defer _ = &GlobalFree;
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
   hcpwa::AABB<2> aabb = {{0, 0}, {1, 1}};
   hcpwa::LineSet<2> lines = {
       {1, 1, -1},

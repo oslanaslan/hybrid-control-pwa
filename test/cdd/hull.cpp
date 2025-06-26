@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <lineareq.hpp>
-#include "cdd.hpp"
+#include <cddwrap/lineareq.hpp>
+#include <cddwrap/cdd.hpp>
 #include "utility.hpp"
 
 static bool CheckPoints(const cddwrap::matrix<double>& m,
@@ -19,8 +19,8 @@ static bool CheckPoints(const cddwrap::matrix<double>& m,
 }
 
 TEST(cdd, hull2d) {
-  GlobalInit();
-  defer _ = &GlobalFree;
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
   // Ax<b <=> -Ax+b >= 0
   // Format: A|b
   {

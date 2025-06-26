@@ -57,7 +57,7 @@ struct matrix {  // NOLINT
     return *this;
   }
 
-  void swap(matrix& other) {
+  void swap(matrix& other) {  // NOLINT
     values_.swap(other.values_);
     cols_ = std::exchange(other.cols_, cols_);
   }
@@ -78,31 +78,31 @@ struct matrix {  // NOLINT
     return std::span<const T>(values_.begin() + (row * cols_), cols_);
   }
 
-  std::size_t rows() const {
+  std::size_t rows() const {  // NOLINT
     return values_.size() / cols_;
   }
 
-  std::size_t cols() const {
+  std::size_t cols() const {  // NOLINT
     return cols_;
   }
 
   template <std::ranges::range R>
-  void push_back(R&& row) {
+  void push_back(R&& row) {  // NOLINT
     values_.append_range(row | std::ranges::views::take(cols_));
     while (values_.size() % cols_ != 0) {
       values_.emplace_back();
     }
   }
 
-  void emplace_back() {
+  void emplace_back() {  // NOLINT
     values_.resize(values_.size() + cols_);
   }
 
-  std::span<T> back() {
+  std::span<T> back() {  // NOLINT
     return std::span<T>(values_.end() - cols_, cols_);
   }
 
-  std::span<const T> back() const {
+  std::span<const T> back() const {  // NOLINT
     return std::span<T>(values_.end() - cols_, cols_);
   }
 

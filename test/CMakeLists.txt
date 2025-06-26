@@ -20,7 +20,7 @@ foreach(TEST_DIR ${SUBDIRS})
       add_subdirectory(${TEST_NAME})
     else()
       file(GLOB_RECURSE TEST_SRC_FILES CONFIGURE_DEPENDS
-      "./**/*.cpp"
+      "${TEST_DIR}/**.cpp"
       )
       add_executable(${TEST_TARGET} ${TEST_SRC_FILES})
       message("Test target: ${TEST_NAME}")

@@ -1,7 +1,6 @@
 #include <algo.hpp>
 #include <algorithm>
-#include "lineareq.hpp"
-#include "matrix.hpp"
+#include "cddwrap/lineareq.hpp"
 #include "morph.hpp"
 
 namespace hcpwa {

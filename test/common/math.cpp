@@ -131,3 +131,39 @@ TEST(math, triangulate) {
   ASSERT_EQ(tri[2].second, 1);
   ASSERT_EQ(tri[3].second, 1);
 }
+
+TEST(math, prism1) {
+  hcpwa::Triangle triangle = {{0, 0}, {0, 1}, {1, 0}};
+  auto prism = hcpwa::CalcPrism(triangle, {0, 1});
+
+  const hcpwa::Vec<8> inside{0.4, 0.4, 0};
+  const hcpwa::Vec<8> outside{-0.5, 0.5, 0};
+
+  ASSERT_EQ(prism.size(), 3);
+
+  ASSERT_LT(hcpwa::Apply(prism[0], inside), 0);
+  ASSERT_LT(hcpwa::Apply(prism[1], inside), 0);
+  ASSERT_LT(hcpwa::Apply(prism[2], inside), 0);
+
+  ASSERT_TRUE(hcpwa::Apply(prism[0], outside) > 0
+              || hcpwa::Apply(prism[1], outside) > 0
+              || hcpwa::Apply(prism[2], outside) > 0);
+}
+
+TEST(math, prism2) {
+  hcpwa::Triangle triangle = {{0, 0}, {0, 1}, {1, 0}};
+  auto prism = hcpwa::CalcPrism(triangle, {0, 2});
+
+  const hcpwa::Vec<8> inside{0.4, 1, 0.4, 0};
+  const hcpwa::Vec<8> outside{-0.5, 0, 0.5, 0};
+
+  ASSERT_EQ(prism.size(), 3);
+
+  ASSERT_LT(hcpwa::Apply(prism[0], inside), 0);
+  ASSERT_LT(hcpwa::Apply(prism[1], inside), 0);
+  ASSERT_LT(hcpwa::Apply(prism[2], inside), 0);
+
+  ASSERT_TRUE(hcpwa::Apply(prism[0], outside) > 0
+              || hcpwa::Apply(prism[1], outside) > 0
+              || hcpwa::Apply(prism[2], outside) > 0);
+}

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include "lineareq.hpp"
 #include "matrix.hpp"
+#include "morph.hpp"
 
 namespace hcpwa {
 
@@ -44,7 +45,7 @@ std::vector<PolygonResolution> SplitAABBWithLines(AABB<2> aabb,
       const Line<2>& line = is_gt ? -lines[i] : lines[i];
       inequalities[i][0] = (double)line.x;
       inequalities[i][1] = (double)line.y;
-      inequalities[i][2] = -(double)(line.z);
+      inequalities[i][2] = (double)line.z;
     }
 
     auto points = GetHullPoints(inequalities);
@@ -90,6 +91,36 @@ std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
     for (std::size_t j = 2; j < poly.size(); j++) {
       result.emplace_back(Triangle{.a = a, .b = poly[j - 1], .c = poly[j]}, i);
     }
+  }
+  return result;
+}
+
+std::vector<hcpwa::Line<8>> CalcPrism(const Triangle& triangle,
+                                      const std::array<int, 2>& dims) {
+  std::vector<hcpwa::Line<8>> result;
+  {
+    hcpwa::Line<2> line
+        = cross(hcpwa::Vec<3>{triangle.a, 1}, hcpwa::Vec<3>{triangle.b, 1});
+    if (dot(line, hcpwa::Vec<3>{triangle.c, 1}) > 0) {
+      line = -line;
+    }
+    result.push_back(hcpwa::Promote<9>(line, {dims[0], dims[1], 8}));
+  }
+  {
+    hcpwa::Line<2> line
+        = cross(hcpwa::Vec<3>{triangle.b, 1}, hcpwa::Vec<3>{triangle.c, 1});
+    if (dot(line, hcpwa::Vec<3>{triangle.a, 1}) > 0) {
+      line = -line;
+    }
+    result.push_back(hcpwa::Promote<9>(line, {dims[0], dims[1], 8}));
+  }
+  {
+    hcpwa::Line<2> line
+        = cross(hcpwa::Vec<3>{triangle.a, 1}, hcpwa::Vec<3>{triangle.c, 1});
+    if (dot(line, hcpwa::Vec<3>{triangle.b, 1}) > 0) {
+      line = -line;
+    }
+    result.push_back(hcpwa::Promote<9>(line, {dims[0], dims[1], 8}));
   }
   return result;
 }

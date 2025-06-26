@@ -13,4 +13,8 @@ void NormalizeVertices(std::vector<hcpwa::PolygonResolution>& data,
 
 std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
     const std::span<hcpwa::PolygonResolution>& data);
+
+std::vector<hcpwa::Line<8>> CalcPrism(const Triangle& triangle,
+                                      const std::array<int, 2>& dims);
+
 }  // namespace hcpwa

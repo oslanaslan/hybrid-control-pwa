@@ -5,8 +5,10 @@
 #include <utility>
 #include <ranges>
 
+namespace cddwrap {
+
 template <typename T>
-struct matrix {
+struct matrix {  // NOLINT
   constexpr matrix(std::size_t cols, std::initializer_list<T> elems)
       : values_(elems),
         cols_(cols) {
@@ -108,3 +110,4 @@ struct matrix {
   std::vector<T> values_;
   std::size_t cols_;
 };
+}  // namespace cddwrap

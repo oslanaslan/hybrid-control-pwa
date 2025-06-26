@@ -21,7 +21,7 @@ std::vector<PolygonResolution> SplitAABBWithLines(AABB<2> aabb,
                                                   const LineSet<2>& lines) {
   std::vector<PolygonResolution> result;
   const std::uint64_t options = 1 << lines.size();
-  matrix<double> inequalities(3, lines.size() + 4);
+  cddwrap::matrix<double> inequalities(3, lines.size() + 4);
   {
     inequalities[lines.size()][0] = 1;
     inequalities[lines.size()][1] = 0;
@@ -45,7 +45,7 @@ std::vector<PolygonResolution> SplitAABBWithLines(AABB<2> aabb,
       const Line<2>& line = is_gt ? -lines[i] : lines[i];
       inequalities[i][0] = (double)line.x;
       inequalities[i][1] = (double)line.y;
-      inequalities[i][2] = (double)line.z;
+      inequalities[i][2] = -(double)line.z;
     }
 
     auto points = GetHullPoints(inequalities);

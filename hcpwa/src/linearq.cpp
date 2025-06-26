@@ -3,7 +3,7 @@
 #include <string>
 #include <stdexcept>
 #include <utility.hpp>
-
+namespace cddwrap {
 matrix<double> GetHullPoints(const matrix<double>& inequalities) {
   dd_MatrixPtr m = dd_CreateMatrix(inequalities.rows(), inequalities.cols());
   m->representation = dd_Inequality;
@@ -57,4 +57,5 @@ matrix<double> GetHullPoints(const matrix<double>& inequalities) {
     }
   }
   return result;
+}
 }

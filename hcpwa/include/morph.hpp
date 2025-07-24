@@ -6,10 +6,22 @@ namespace hcpwa {
 
 template <int N, int M>
 constexpr Vec<N> Promote(const Vec<M>& v, const std::array<int, M>& pos) {
-  Vec<N> result(0);
+  Vec<N> result = kZeroVec;
   for (int i = 0; i < M; i++) {
     result[pos[i]] = v[i];
   }
+  return result;
+}
+
+template <int N, typename T>
+  requires(N >= VectorSize<T>() - 1)
+constexpr Line<N> Expand(const T& line) {
+  constexpr int kM = VectorSize<T>() - 1;
+  Line<N> result = kZeroVec;
+  for (int i = 0; i < kM; i++) {
+    result[i] = line[i];
+  }
+  result[N] = line[kM];
   return result;
 }
 

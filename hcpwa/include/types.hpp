@@ -148,4 +148,41 @@ struct Triangle {
   Vec<2> a, b, c;
 };
 
+struct Params {
+  Float b51, F, v, w, N, b57, b84, b86;
+  Float f2min;
+  Float f3min;
+  Float f5min;
+  Float f8min;
+  Float f2max;
+  Float f3max;
+  Float f5max;
+  Float f8max;
+};
+
+template <typename T>
+concept Vector = requires(T v) { []<int N>(Vec<N>) {}(v); };
+
+template <int N>
+consteval int VectorSize(Vec<N>) {
+  return N;
+}
+
+template <Vector T>
+consteval int VectorSize() {
+  return VectorSize(T{});
+}
+
+constexpr struct {
+  template <Vector T>
+  constexpr operator T() const {  // NOLINT
+    T result;
+    constexpr int kN = VectorSize<T>();
+    for (int i = 0; i < kN; i++) {
+      result[i] = 0;
+    }
+    return result;
+  }
+} kZeroVec;
+
 }  // namespace hcpwa

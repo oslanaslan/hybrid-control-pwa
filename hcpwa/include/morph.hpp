@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <types.hpp>
 
 namespace hcpwa {
@@ -40,6 +41,26 @@ hcpwa::LineSet<N> AABBBounds(const AABB<N>& aabb) {
     result.push_back(far);
   }
   return result;
+}
+
+
+template <int N>
+constexpr auto ResoltionsToMasks(
+    const std::vector<std::pair<LineSet<N>, Line<N>>>& resolutions) {
+  LineSet<N> lineset;
+  std::vector<std::bitset<64>> masks;
+
+  for (std::size_t i = 0; i < resolutions.size(); i++) {
+    std::size_t start = lineset.size();
+    auto& ls = resolutions[i].first;
+    lineset.append_range(ls);
+    std::bitset<64> mask;
+    for (int n = 0; n < ls.size(); ++n) {
+      mask.set(n + start);
+    }
+    masks.push_back(mask);
+  }
+  return std::pair{std::move(lineset), std::move(masks)};
 }
 
 }  // namespace hcpwa

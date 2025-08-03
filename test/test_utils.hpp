@@ -4,6 +4,8 @@
 #include <vector>
 #include <types.hpp>
 
+#define GTEST_COUT std::cerr << "[          ] [ INFO ]"
+
 namespace tu {
 template <typename T>
 struct PrettyPrint {

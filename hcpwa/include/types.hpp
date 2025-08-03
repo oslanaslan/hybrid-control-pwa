@@ -3,6 +3,7 @@
 #include "float.hpp"
 #include <linalg.h>
 #include <bitset>
+#include <format>
 #include <utility>
 
 namespace linalg {
@@ -186,3 +187,53 @@ constexpr struct {
 } kZeroVec;
 
 }  // namespace hcpwa
+namespace std {
+template <int N>
+struct formatter<hcpwa::Vec<N>, char> {
+  // NOLINTNEXTLINE
+  constexpr auto parse(std::format_parse_context& ctx) {
+    return ctx.begin();
+  }
+
+  // NOLINTNEXTLINE
+  auto format(const hcpwa::Vec<N>& id, std::format_context& ctx) const {
+    std::format_to(ctx.out(), "<");
+    for (int i = 0; i < N; i++) {
+      if (i + 1 < N) {
+        std::format_to(ctx.out(), "{}, ", id[i]);
+
+      } else {
+        std::format_to(ctx.out(), "{}", id[i]);
+      }
+    }
+    return std::format_to(ctx.out(), ">");
+  }
+};
+
+template <int N>
+struct formatter<std::vector<hcpwa::Vec<N>>, char> {
+  // NOLINTNEXTLINE
+  constexpr auto parse(std::format_parse_context& ctx) {
+    return ctx.begin();
+  }
+
+  // NOLINTNEXTLINE
+  auto format(const std::vector<hcpwa::Vec<N>>& ids,
+              std::format_context& ctx) const {
+    std::format_to(ctx.out(), "[");
+    for (const auto& id : ids) {
+      std::format_to(ctx.out(), "\n<");
+      for (int i = 0; i < N; i++) {
+        if (i + 1 < N) {
+          std::format_to(ctx.out(), "{}, ", id[i]);
+
+        } else {
+          std::format_to(ctx.out(), "{}", id[i]);
+        }
+      }
+      std::format_to(ctx.out(), ">");
+    }
+    return std::format_to(ctx.out(), "\n]");
+  }
+};
+}  // namespace std

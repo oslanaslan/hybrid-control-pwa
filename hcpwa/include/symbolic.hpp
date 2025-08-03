@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <morph.hpp>
+#include "float.hpp"
+#include "types.hpp"
 
 namespace hcpwa::symbols {
 
@@ -16,6 +19,22 @@ consteval auto Max(T first, Ts... args) {
 }  // namespace internal
 
 template <typename T>
+  requires requires(T v) {
+    { v.Linearize() } -> Vector;
+  }
+constexpr decltype(auto) Linearize(T v) {
+  return v.Linearize();
+}
+
+constexpr auto Linearize(int v) {
+  return Line<1>(0, v);
+}
+
+constexpr auto Linearize(Float v) {
+  return Line<1>(0, v);
+}
+
+template <typename T>
 concept SymExpr = requires(T e) {
   { Linearize(e) } -> Vector;
 };
@@ -29,14 +48,6 @@ concept SymMinExpr = requires(T e) {
   };
   { e.Dim() } -> std::same_as<int>;
 };
-
-template <typename T>
-  requires requires(T v) {
-    { v.Linearize() } -> Vector;
-  }
-constexpr decltype(auto) Linearize(T v) {
-  return v.Linearize();
-}
 
 constexpr auto MakeSymExpr(auto lambda) {
   struct Expr {
@@ -64,6 +75,10 @@ struct X {
 
 struct C {
   Float value;
+  // NOLINTNEXTLINE
+  constexpr C(Float value)
+      : value(value) {
+  }
   constexpr auto Linearize() {
     return Line<1>{0, value};
   }
@@ -175,6 +190,26 @@ constexpr auto MinOptions(SymMinExpr auto expr) {
     return ex;
   });
   return result;
+}
+
+constexpr auto MinResolutions(SymMinExpr auto expr) {
+  constexpr int kDim = expr.Dim();
+  LineSet<kDim> result;
+  expr.apply([&result](SymExpr auto ex) {
+    result.push_back(Linearize(ex));
+    return ex;
+  });
+  std::vector<std::pair<LineSet<kDim>, Line<kDim>>> resolutions;
+  for (std::size_t i = 0; i < result.size(); i++) {
+    LineSet<kDim> eqs;
+    for (std::size_t j = 0; j < result.size(); j++) {
+      if (i != j) {
+        eqs.push_back(result[i] - result[j]);
+      }
+    }
+    resolutions.push_back(std::pair{std::move(eqs), result[i]});
+  }
+  return resolutions;
 }
 
 }  // namespace hcpwa::symbols

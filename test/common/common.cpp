@@ -2,6 +2,8 @@
 #include <hcpwa.hpp>
 #include <uniqie_pool.hpp>
 #include <symbolic.hpp>
+#include "morph.hpp"
+#include "types.hpp"
 
 TEST(common, pool) {
   using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Float, 0.1f>;
@@ -49,5 +51,27 @@ TEST(common, symbolic) {
     auto lines = MinOptions(v);
     hcpwa::LineSet<1> ex = {{1, 2}, {-1, 1}};
     ASSERT_EQ(lines, ex);
+  }
+  {
+    auto v = SymMin(X<0>{} + C{2}, C{1} - X<0>{});
+    auto resolutions = MinResolutions(v);
+    constexpr int kDim
+        = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
+    auto [lines, masks] = hcpwa::ResoltionsToMasks<kDim>(resolutions);
+
+    ASSERT_EQ(masks.size(), 2);
+    ASSERT_EQ(masks[0], 0b01);
+    ASSERT_EQ(masks[1], 0b10);
+  }
+  {
+    auto v = SymMin(C{3} * X<0>{}, C{6} - C{3} * X<0>{});
+    auto resolutions = MinResolutions(v);
+    constexpr int kDim
+        = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
+    auto [lines, masks] = hcpwa::ResoltionsToMasks<kDim>(resolutions);
+
+    ASSERT_EQ(masks.size(), 2);
+    ASSERT_EQ(masks[0], 0b01);
+    ASSERT_EQ(masks[1], 0b10);
   }
 }

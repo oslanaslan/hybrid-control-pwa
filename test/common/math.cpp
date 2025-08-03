@@ -6,7 +6,6 @@
 #include "morph.hpp"
 #include "utility.hpp"
 #include "test_utils.hpp"
-#include <ranges>
 
 TEST(math, vec) {
   hcpwa::Vec<2> a{1, 2};

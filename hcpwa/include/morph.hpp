@@ -45,7 +45,7 @@ hcpwa::LineSet<N> AABBBounds(const AABB<N>& aabb) {
 
 
 template <int N>
-constexpr auto ResoltionsToMasks(
+constexpr auto ResolutionsToMasks(
     const std::vector<std::pair<LineSet<N>, Line<N>>>& resolutions) {
   LineSet<N> lineset;
   std::vector<std::bitset<64>> masks;

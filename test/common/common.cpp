@@ -57,7 +57,7 @@ TEST(common, symbolic) {
     auto resolutions = MinResolutions(v);
     constexpr int kDim
         = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResoltionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
 
     ASSERT_EQ(masks.size(), 2);
     ASSERT_EQ(masks[0], 0b01);
@@ -68,7 +68,7 @@ TEST(common, symbolic) {
     auto resolutions = MinResolutions(v);
     constexpr int kDim
         = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResoltionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
 
     ASSERT_EQ(masks.size(), 2);
     ASSERT_EQ(masks[0], 0b01);

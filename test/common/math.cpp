@@ -87,8 +87,8 @@ TEST(math, normalize) {
   hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
   pool.Unique(aabb.first);
   pool.Unique(aabb.second);
-  pool.Unique({aabb.first.x, aabb.second.y});
-  pool.Unique({aabb.second.x, aabb.first.y});
+  pool.Unique({aabb.first[0], aabb.second[1]});
+  pool.Unique({aabb.second[0], aabb.first[1]});
 
   hcpwa::NormalizeVertices(polygons, pool);
 

@@ -26,7 +26,7 @@ constexpr std::ostream& operator<<(std::ostream& os, const PrettyPrint<T>& pp) {
 }
 
 template <typename T>
-using VecValueType = decltype([]<typename F, int N>(linalg::vec<F, N>) -> F {
+using VecValueType = decltype([]<typename F, int N>(linalg::Vector<F, N>) -> F {
   throw 1;
 }(std::declval<T>()));
 

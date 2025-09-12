@@ -1,122 +1,125 @@
 #pragma once
 
 #include "float.hpp"
-#include <linalg.h>
+// #include <linalg.h>
 #include <bitset>
 #include <format>
 #include <utility>
+#include <vector.hpp>
+#include <vector>
 
-namespace linalg {
-template <>
-struct vec<hcpwa::Float, 8> {
-  hcpwa::Float x, y, z, w, x5, x6, x7, x8;
-  constexpr hcpwa::Float& operator[](int i) {
-    switch (i) {
-      case 0:
-        return x;
-      case 1:
-        return y;
-      case 2:
-        return z;
-      case 3:
-        return w;
-      case 4:
-        return x5;
-      case 5:
-        return x6;
-      case 6:
-        return x7;
-      case 7:
-        return x8;
-    }
-    std::unreachable();
-  }
+// namespace linalg {
+// template <>
+// struct vec<hcpwa::Float, 8> {
+//   hcpwa::Float x, y, z, w, x5, x6, x7, x8;
+//   constexpr hcpwa::Float& operator[](int i) {
+//     switch (i) {
+//       case 0:
+//         return x;
+//       case 1:
+//         return y;
+//       case 2:
+//         return z;
+//       case 3:
+//         return w;
+//       case 4:
+//         return x5;
+//       case 5:
+//         return x6;
+//       case 6:
+//         return x7;
+//       case 7:
+//         return x8;
+//     }
+//     std::unreachable();
+//   }
 
-  constexpr const hcpwa::Float& operator[](int i) const {
-    switch (i) {
-      case 0:
-        return x;
-      case 1:
-        return y;
-      case 2:
-        return z;
-      case 3:
-        return w;
-      case 4:
-        return x5;
-      case 5:
-        return x6;
-      case 6:
-        return x7;
-      case 7:
-        return x8;
-    }
-    std::unreachable();
-  }
-};
+//   constexpr const hcpwa::Float& operator[](int i) const {
+//     switch (i) {
+//       case 0:
+//         return x;
+//       case 1:
+//         return y;
+//       case 2:
+//         return z;
+//       case 3:
+//         return w;
+//       case 4:
+//         return x5;
+//       case 5:
+//         return x6;
+//       case 6:
+//         return x7;
+//       case 7:
+//         return x8;
+//     }
+//     std::unreachable();
+//   }
+// };
 
-template <>
-struct vec<hcpwa::Float, 9> {
-  hcpwa::Float x, y, z, w, x5, x6, x7, x8, x9;
-  constexpr hcpwa::Float& operator[](int i) {
-    switch (i) {
-      case 0:
-        return x;
-      case 1:
-        return y;
-      case 2:
-        return z;
-      case 3:
-        return w;
-      case 4:
-        return x5;
-      case 5:
-        return x6;
-      case 6:
-        return x7;
-      case 7:
-        return x8;
-      case 8:
-        return x9;
-    }
-    std::unreachable();
-  }
+// template <>
+// struct vec<hcpwa::Float, 9> {
+//   hcpwa::Float x, y, z, w, x5, x6, x7, x8, x9;
+//   constexpr hcpwa::Float& operator[](int i) {
+//     switch (i) {
+//       case 0:
+//         return x;
+//       case 1:
+//         return y;
+//       case 2:
+//         return z;
+//       case 3:
+//         return w;
+//       case 4:
+//         return x5;
+//       case 5:
+//         return x6;
+//       case 6:
+//         return x7;
+//       case 7:
+//         return x8;
+//       case 8:
+//         return x9;
+//     }
+//     std::unreachable();
+//   }
 
-  constexpr const hcpwa::Float& operator[](int i) const {
-    switch (i) {
-      case 0:
-        return x;
-      case 1:
-        return y;
-      case 2:
-        return z;
-      case 3:
-        return w;
-      case 4:
-        return x5;
-      case 5:
-        return x6;
-      case 6:
-        return x7;
-      case 7:
-        return x8;
-      case 8:
-        return x9;
-    }
-    std::unreachable();
-  }
-};
-}  // namespace linalg
+//   constexpr const hcpwa::Float& operator[](int i) const {
+//     switch (i) {
+//       case 0:
+//         return x;
+//       case 1:
+//         return y;
+//       case 2:
+//         return z;
+//       case 3:
+//         return w;
+//       case 4:
+//         return x5;
+//       case 5:
+//         return x6;
+//       case 6:
+//         return x7;
+//       case 7:
+//         return x8;
+//       case 8:
+//         return x9;
+//     }
+//     std::unreachable();
+//   }
+// };
+// }  // namespace linalg
 
 namespace hcpwa {
 
 template <int N>
-  requires(sizeof(linalg::vec<Float, N>) == sizeof(Float) * N
-           && alignof(linalg::vec<Float, N>) == alignof(Float))
-using Vec = linalg::vec<hcpwa::Float, N>;
+  requires(sizeof(linalg::Vector<hcpwa::Float, N>) == sizeof(hcpwa::Float) * N
+           && alignof(linalg::Vector<hcpwa::Float, N>) == alignof(hcpwa::Float))
+// using Vec = linalg::vec<hcpwa::Float, N>;
+using Vec = linalg::Vector<hcpwa::Float, N>;
 
 constexpr Float modulo(const Vec<2>& v) {  // NOLINT
-  return v.x * v.x + v.y * v.y;
+  return v[0] * v[0] + v[1] * v[1];
 }
 
 // Format x*x + y*y + z = 0

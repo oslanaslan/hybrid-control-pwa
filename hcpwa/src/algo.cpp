@@ -24,27 +24,27 @@ std::vector<PolygonResolution> SplitAABBWithLines(AABB<2> aabb,
   {
     inequalities[lines.size()][0] = 1;
     inequalities[lines.size()][1] = 0;
-    inequalities[lines.size()][2] = (double)aabb.second.x;
+    inequalities[lines.size()][2] = (double)aabb.second[0];
 
     inequalities[lines.size() + 1][0] = 0;
     inequalities[lines.size() + 1][1] = 1;
-    inequalities[lines.size() + 1][2] = (double)aabb.second.y;
+    inequalities[lines.size() + 1][2] = (double)aabb.second[1];
 
     inequalities[lines.size() + 2][0] = -1;
     inequalities[lines.size() + 2][1] = 0;
-    inequalities[lines.size() + 2][2] = (double)aabb.first.x;
+    inequalities[lines.size() + 2][2] = (double)aabb.first[0];
 
     inequalities[lines.size() + 3][0] = 0;
     inequalities[lines.size() + 3][1] = -1;
-    inequalities[lines.size() + 3][2] = (double)aabb.first.y;
+    inequalities[lines.size() + 3][2] = (double)aabb.first[1];
   }
   for (std::uint64_t option_ind = 0; option_ind < options; option_ind++) {
     for (std::uint64_t i = 0; i < lines.size(); i++) {
       const bool is_gt = (option_ind & (1 << i)) != 0;
       const Line<2>& line = is_gt ? -lines[i] : lines[i];
-      inequalities[i][0] = (double)line.x;
-      inequalities[i][1] = (double)line.y;
-      inequalities[i][2] = -(double)line.z;
+      inequalities[i][0] = (double)line[0];
+      inequalities[i][1] = (double)line[1];
+      inequalities[i][2] = -(double)line[2];
     }
 
     auto points = GetHullPoints(inequalities);

@@ -39,8 +39,8 @@ TEST(complex, symbolic2d) {
     hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
     pool.Unique(aabb.first);
     pool.Unique(aabb.second);
-    pool.Unique({aabb.first.x, aabb.second.y});
-    pool.Unique({aabb.second.x, aabb.first.y});
+    pool.Unique({aabb.first[0], aabb.second[1]});
+    pool.Unique({aabb.second[0], aabb.first[1]});
 
     hcpwa::NormalizeVertices(polygons, pool);
 
@@ -84,14 +84,14 @@ TEST(complex, symbolic3d) {
         = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
     auto polygons
-        = hcpwa::SplitAABBWithLines({aabb.first.xy(), aabb.second.xy()}, lines);
+        = hcpwa::SplitAABBWithLines({aabb.first[0, 1], aabb.second[0, 1]}, lines);
 
     using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Vec<2>, 0.01f>;
     hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
-    pool.Unique(aabb.first.xy());
-    pool.Unique(aabb.second.xy());
-    pool.Unique({aabb.first.x, aabb.second.y});
-    pool.Unique({aabb.second.x, aabb.first.y});
+    pool.Unique(aabb.first[0, 1]);
+    pool.Unique(aabb.second[0, 1]);
+    pool.Unique({aabb.first[0], aabb.second[1]});
+    pool.Unique({aabb.second[0], aabb.first[1]});
 
     hcpwa::NormalizeVertices(polygons, pool);
 
@@ -116,6 +116,48 @@ TEST(complex, symbolic3d) {
   }
 }
 
-TEST(complex, intersect) {
-  
-}
+// TEST(complex, intersect) {
+//   // NOLINTNEXTLINE
+//   using namespace hcpwa::symbols;
+
+//   cddwrap::global_init();
+//   defer _ = &cddwrap::global_free;
+
+//   constexpr hcpwa::Float N = 100;
+//   constexpr hcpwa::Float F = 20;
+//   constexpr hcpwa::Float v = 10;
+//   constexpr hcpwa::Float w = 10;
+//   constexpr hcpwa::Float b51 = 10;
+//   constexpr hcpwa::Float b57 = 10;
+//   constexpr hcpwa::Float b84 = 10;
+//   constexpr hcpwa::Float b86 = 10;
+//   constexpr hcpwa::Float f2min = 10;
+//   constexpr hcpwa::Float f3min = 10;
+//   constexpr hcpwa::Float f5min = 10;
+//   constexpr hcpwa::Float f8min = 10;
+//   constexpr hcpwa::Float f2max = 10;
+//   constexpr hcpwa::Float f3max = 10;
+//   constexpr hcpwa::Float f5max = 10;
+//   constexpr hcpwa::Float f8max = 10;
+
+//   hcpwa::AABB<8> aabb = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
+
+//   constexpr auto n1 = X<0>{};
+//   constexpr auto n2 = X<1>{};
+//   constexpr auto n3 = X<2>{};
+//   constexpr auto n4 = X<3>{};
+//   constexpr auto n5 = X<4, 7>{};
+//   constexpr auto n6 = X<5>{};
+//   constexpr auto n7 = X<6>{};
+//   constexpr auto n8 = X<7>{};
+
+//   // f51(t) = min{β51F,β51vn5(t),w(N−n1(t))}
+//   auto f51 = SymMin(b51 * F, (v * b51) * n5, w * (N - n1));
+//   // f57(t) = min{β57F,β57vn5(t),w(N−n7(t))}
+//   auto f57 = SymMin(b57 * F, v * b57 * n5, w * (N - n7));
+//   // f84(t) = min{β84F,β84vn8(t),w(N−n4(t))}
+//   auto f84 = SymMin(b84 * F, v * b84 * n8, w * (N - n4));
+//   // f86(t) = min{β86F,β86vn8(t),w(N−n6(t))}
+//   auto f86 = SymMin(b86 * F, v * b86 * n8, w * (N - n6));
+
+// }

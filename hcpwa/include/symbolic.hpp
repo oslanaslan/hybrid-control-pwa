@@ -59,7 +59,7 @@ constexpr auto MakeSymExpr(auto lambda) {
   return Expr{.f = std::move(lambda)};
 }
 
-template <int N, int Hint = N>
+template <int N>
   requires(N >= 0)
 struct X {
   consteval friend int Dim(X) {
@@ -67,7 +67,7 @@ struct X {
   }
 
   constexpr auto Linearize() {
-    Line<Hint + 1> result = kZeroVec;
+    Line<N + 1> result = kZeroVec;
     result[N] = 1;
     return result;
   }

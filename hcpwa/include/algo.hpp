@@ -18,4 +18,7 @@ hcpwa::LineSet<8> CalcPrism(const Triangle& triangle,
                             const std::array<int, 2>& dims);
 
 std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data);
+
+std::vector<std::pair<hcpwa::Triangle, std::size_t>> TrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons);
+
 }  // namespace hcpwa

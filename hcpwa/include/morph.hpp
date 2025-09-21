@@ -63,4 +63,21 @@ constexpr auto ResolutionsToMasks(
   return std::pair{std::move(lineset), std::move(masks)};
 }
 
+template <int N, int M>
+constexpr auto DimensionCast(const Line<M>& line, const std::array<int, N>& pos) {
+  Line<N> result = kZeroVec;
+  for (int i = 0; i < N; i++) {
+    result[i] = line[pos[i]];
+  }
+  result[N] = line[M];
+  return result;
+}
+template <int N, int M>
+constexpr auto DimensionCast(const LineSet<M>& lines, const std::array<int, N>& pos) {
+  LineSet<N> result;
+  for (const auto& line : lines) {
+    result.push_back(DimensionCast<N, M>(line, pos));
+  }
+  return result;
+}
 }  // namespace hcpwa

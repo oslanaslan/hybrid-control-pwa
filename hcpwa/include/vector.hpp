@@ -384,6 +384,10 @@ public:
     constexpr auto operator[](Args... args) const {
         return Vector<T, sizeof...(Args)>(data_[args]...);
     }
+
+    std::vector<T> ToVector() const {
+        return std::vector<T>(data_.begin(), data_.end());
+    }
 };
 
 template<typename T>

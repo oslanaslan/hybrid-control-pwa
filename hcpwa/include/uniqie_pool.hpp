@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 namespace hcpwa {
@@ -37,6 +38,15 @@ struct UniquePool {
     }
     elements_.push_back(value);
     return value;
+  }
+
+  constexpr std::size_t Index(T value) {
+    for (std::size_t i = 0; i < elements_.size(); i++) {
+      if (comparator_(elements_[i], value)) {
+        return i;
+      }
+    }
+    return static_cast<std::size_t>(-1);
   }
 
  private:

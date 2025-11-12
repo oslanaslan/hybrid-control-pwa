@@ -145,7 +145,7 @@ std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data) {
   return result;
 }
 
-std::vector<std::pair<hcpwa::Triangle, std::size_t>> TrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons) {
+std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons) {
   using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Vec<2>, 0.01f>;
   hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
   pool.Unique(aabb.first[0, 1]);
@@ -154,7 +154,16 @@ std::vector<std::pair<hcpwa::Triangle, std::size_t>> TrianglesWithUniqueVertices
   pool.Unique({aabb.second[0], aabb.first[1]});
   hcpwa::NormalizeVertices(polygons, pool);
   auto triangles = Triangulate(polygons);
-  return triangles;
+  std::vector<hcpwa::TriangleWithUniqueVertices> result;
+  for (std::size_t i = 0; i < triangles.size(); i++) {
+    result.push_back(hcpwa::TriangleWithUniqueVertices{
+      triangles[i].first,
+      .a_index = pool.Index(triangles[i].first.a),
+      .b_index = pool.Index(triangles[i].first.b),
+      .c_index = pool.Index(triangles[i].first.c),
+      .polygon_index = triangles[i].second});
+  }
+  return result;
 }
 
 }  // namespace hcpwa

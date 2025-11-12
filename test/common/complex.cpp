@@ -127,18 +127,18 @@ TEST(complex, intersect) {
   constexpr hcpwa::Float F = 20;
   constexpr hcpwa::Float v = 10;
   constexpr hcpwa::Float w = 10;
-  constexpr hcpwa::Float b51 = 10;
-  constexpr hcpwa::Float b57 = 10;
-  constexpr hcpwa::Float b84 = 10;
-  constexpr hcpwa::Float b86 = 10;
+  constexpr hcpwa::Float b51 = 0.5;
+  constexpr hcpwa::Float b57 = 0.5;
+  constexpr hcpwa::Float b84 = 0.5;
+  constexpr hcpwa::Float b86 = 0.5;
   constexpr hcpwa::Float f2min = 10;
   constexpr hcpwa::Float f3min = 10;
   constexpr hcpwa::Float f5min = 10;
   constexpr hcpwa::Float f8min = 10;
-  constexpr hcpwa::Float f2max = 10;
-  constexpr hcpwa::Float f3max = 10;
-  constexpr hcpwa::Float f5max = 10;
-  constexpr hcpwa::Float f8max = 10;
+  constexpr hcpwa::Float f2max = 90;
+  constexpr hcpwa::Float f3max = 90;
+  constexpr hcpwa::Float f5max = 90;
+  constexpr hcpwa::Float f8max = 90;
 
   hcpwa::AABB<8> aabb = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
   hcpwa::AABB<2> aabb2d = {{0, 0}, {N, N}};
@@ -276,10 +276,10 @@ TEST(complex, intersect) {
   }
 
   // Triangulated polygons with unique vertices
-  auto triangles51 = hcpwa::TrianglesWithUniqueVertices(aabb2d, polygon51);
-  auto triangles57 = hcpwa::TrianglesWithUniqueVertices(aabb2d, polygon57);
-  auto triangles84 = hcpwa::TrianglesWithUniqueVertices(aabb2d, polygon84);
-  auto triangles86 = hcpwa::TrianglesWithUniqueVertices(aabb2d, polygon86);
+  std::vector<hcpwa::TriangleWithUniqueVertices> triangles51 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon51);
+  std::vector<hcpwa::TriangleWithUniqueVertices> triangles57 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon57);
+  std::vector<hcpwa::TriangleWithUniqueVertices> triangles84 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon84);
+  std::vector<hcpwa::TriangleWithUniqueVertices> triangles86 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon86);
 
   GTEST_COUT << "Unique vertices polygons:\n";
   for (int i = 0; i < polygon51.size(); i++) {
@@ -297,24 +297,24 @@ TEST(complex, intersect) {
 
   GTEST_COUT << "Triangulated polygons with unique vertices:\n";
   for (int i = 0; i < triangles51.size(); i++) {
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].first.a);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].first.b);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].first.c);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].a);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].b);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles51[i].c);
   }
   for (int i = 0; i < triangles57.size(); i++) {
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].first.a);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].first.b);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].first.c);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].a);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].b);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles57[i].c);
   }
   for (int i = 0; i < triangles84.size(); i++) {
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].first.a);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].first.b);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].first.c);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].a);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].b);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles84[i].c);
   }
   for (int i = 0; i < triangles86.size(); i++) {
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].first.a);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].first.b);
-    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].first.c);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].a);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].b);
+    GTEST_COUT << std::format("poly {}: {}\n", i, triangles86[i].c);
   }
 
   // Calculate prisms
@@ -323,19 +323,19 @@ TEST(complex, intersect) {
   std::vector<hcpwa::LineSet<8>> prisms84;
   std::vector<hcpwa::LineSet<8>> prisms86;
   for (auto& triangle : triangles51) {
-    auto prism = hcpwa::CalcPrism(triangle.first, {1 - 1, 5 - 1});
+    auto prism = hcpwa::CalcPrism(triangle, {1 - 1, 5 - 1});
     prisms51.push_back(prism);
   }
   for (auto& triangle : triangles57) {
-    auto prism = hcpwa::CalcPrism(triangle.first, {5 - 1, 7 - 1});
+    auto prism = hcpwa::CalcPrism(triangle, {5 - 1, 7 - 1});
     prisms57.push_back(prism);
   }
   for (auto& triangle : triangles84) {
-    auto prism = hcpwa::CalcPrism(triangle.first, {4 - 1, 8 - 1});
+    auto prism = hcpwa::CalcPrism(triangle, {4 - 1, 8 - 1});
     prisms84.push_back(prism);
   }
   for (auto& triangle : triangles86) {
-    auto prism = hcpwa::CalcPrism(triangle.first, {6 - 1, 8 - 1});
+    auto prism = hcpwa::CalcPrism(triangle, {6 - 1, 8 - 1});
     prisms86.push_back(prism);
   }
 

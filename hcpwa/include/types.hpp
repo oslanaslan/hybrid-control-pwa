@@ -152,6 +152,11 @@ struct Triangle {
   Vec<2> a, b, c;
 };
 
+struct TriangleWithUniqueVertices : public Triangle {
+  std::size_t a_index, b_index, c_index;
+  std::size_t polygon_index;
+};
+
 struct Params {
   Float b51, F, v, w, N, b57, b84, b86;
   Float f2min;

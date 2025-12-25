@@ -12,13 +12,13 @@
 #include <uniqie_pool.hpp>
 
 TEST(user_algo, compute_areas_vertices) {
-  // cddwrap::global_init();
-  // defer _ = &cddwrap::global_free;
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
 
   constexpr hcpwa::Float N = 100;
   constexpr hcpwa::Float F = 15;
   constexpr hcpwa::Float v = 0.2;
-  constexpr hcpwa::Float w = 0.3;
+  constexpr hcpwa::Float w = 0.5;
   constexpr hcpwa::Float b51 = 0.5;
   constexpr hcpwa::Float b57 = 0.5;
   constexpr hcpwa::Float b84 = 0.5;
@@ -41,7 +41,8 @@ TEST(user_algo, compute_areas_vertices) {
       b51, b57, b84, b86,
       b31, b36, b24, b27,
       f2min, f3min, f5min, f8min,
-      f2max, f3max, f5max, f8max);
+      f2max, f3max, f5max, f8max
+  );
 
   // Print triangle sizes for phase 0
   GTEST_COUT << "result.triangles31.size(): " << result.triangles31.size() << '\n';

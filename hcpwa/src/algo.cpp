@@ -2,6 +2,7 @@
 #include <algorithm>
 #include "cddwrap/lineareq.hpp"
 #include "morph.hpp"
+#include "types.hpp"
 
 namespace hcpwa {
 
@@ -124,26 +125,36 @@ hcpwa::LineSet<8> CalcPrism(const Triangle& triangle,
   return result;
 }
 
-std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data) {
-  cddwrap::matrix<double> inequalities(9, data.size());
+template<int N>
+std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data) {
+  cddwrap::matrix<double> inequalities(N+1, data.size());
   for (int i = 0; i < data.size(); i++) {
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < N; j++) {
       inequalities[i][j] = (double)data[i][j];
     }
-    inequalities[i][8] = -(double)data[i][8];
+    inequalities[i][8] = -(double)data[i][N];
   }
 
   auto points = GetHullPoints(inequalities);
-  if (points.rows() < 8) {
+  if (points.rows() < N) {
     return {};
   }
-  std::vector<hcpwa::Vec<8>> result;
+  std::vector<hcpwa::Vec<N>> result;
   for (std::size_t i = 0; i < points.rows(); i++) {
-    result.emplace_back(points[i, 0], points[i, 1], points[i, 2], points[i, 3],
-                        points[i, 4], points[i, 5], points[i, 6], points[i, 7]);
+    hcpwa::Vec<N> point = kZeroVec;
+    for (int n = 0; n < N; n++) {
+      point[n] = points[i, n];
+    }
+    // result.emplace_back(points[i, 0], points[i, 1], points[i, 2], points[i, 3],
+    //                     points[i, 4], points[i, 5], points[i, 6], points[i, 7]);
   }
   return result;
 }
+
+template std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data);
+template std::vector<hcpwa::Vec<3>> LinesToPoints(const hcpwa::LineSet<3>& data);
+template std::vector<hcpwa::Vec<2>> LinesToPoints(const hcpwa::LineSet<2>& data);
+
 
 std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons) {
   using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Vec<2>, 0.01f>;

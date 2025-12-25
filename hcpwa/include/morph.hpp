@@ -44,16 +44,19 @@ hcpwa::LineSet<N> AABBBounds(const AABB<N>& aabb) {
 }
 
 
-template <int N>
+template <int N, int DesiredDimension = N>
 constexpr auto ResolutionsToMasks(
     const std::vector<std::pair<LineSet<N>, Line<N>>>& resolutions) {
-  LineSet<N> lineset;
+  LineSet<DesiredDimension> lineset;
   std::vector<std::bitset<64>> masks;
 
   for (std::size_t i = 0; i < resolutions.size(); i++) {
     std::size_t start = lineset.size();
     auto& ls = resolutions[i].first;
-    lineset.append_range(ls);
+    for (const auto& l : ls) {
+      lineset.push_back(Expand<DesiredDimension>(l));
+    }
+    // lineset.append_range(ls);
     std::bitset<64> mask;
     for (int n = 0; n < ls.size(); ++n) {
       mask.set(n + start);

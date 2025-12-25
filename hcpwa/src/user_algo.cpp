@@ -1,6 +1,12 @@
 #include <algo.hpp>
+#include <chrono>
+#include <format>
+#include <mutex>
+#include <ostream>
 #include <symbolic.hpp>
 #include <morph.hpp>
+#include <thread>
+#include <vector>
 #include "cddwrap/cdd.hpp"
 #include "utility.hpp"
 
@@ -14,8 +20,27 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
                                            float b31, float b36, float b24, float b27,
                                            float f2min, float f3min, float f5min, float f8min,
                                            float f2max, float f3max, float f5max, float f8max) {
-  // cddwrap::global_init();
-  // defer _ = &cddwrap::global_free;
+
+  std::cout << "N = " << N << std::endl;
+  std::cout << "F = " << F << std::endl;
+  std::cout << "v = " << v << std::endl;
+  std::cout << "w = " << w << std::endl;
+  std::cout << "b51 = " << b51 << std::endl;
+  std::cout << "b57 = " << b57 << std::endl;
+  std::cout << "b84 = " << b84 << std::endl;
+  std::cout << "b86 = " << b86 << std::endl;
+  std::cout << "b31 = " << b31 << std::endl;
+  std::cout << "b36 = " << b36 << std::endl;
+  std::cout << "b24 = " << b24 << std::endl;
+  std::cout << "b27 = " << b27 << std::endl;
+  std::cout << "f2min = " << f2min << std::endl;
+  std::cout << "f3min = " << f3min << std::endl;
+  std::cout << "f5min = " << f5min << std::endl;
+  std::cout << "f8min = " << f8min << std::endl;
+  std::cout << "f2max = " << f2max << std::endl;
+  std::cout << "f3max = " << f3max << std::endl;
+  std::cout << "f5max = " << f5max << std::endl;
+  std::cout << "f8max = " << f8max << std::endl;
 
   hcpwa::AABB<8> aabb = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
   hcpwa::AABB<2> aabb2d = {{0, 0}, {N, N}};
@@ -79,56 +104,56 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f51);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines51.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f57);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines57.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f84);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines84.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f86);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines86.append_range(lines);
   }
   {
       auto resolutions = MinResolutions(f31);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
       lines31.append_range(lines);
   }
   {
       auto resolutions = MinResolutions(f36);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
       lines36.append_range(lines);
   }
   {
       auto resolutions = MinResolutions(f24);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
       lines24.append_range(lines);
   }
   {
       auto resolutions = MinResolutions(f27);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+      auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
       lines27.append_range(lines);
   }
   // In planes lower bounds
   {
     auto resolutions = MinResolutions(f2in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines24.append_range(lines);
     lines27.append_range(lines);
     lines23.append_range(lines);
@@ -136,7 +161,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f3in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines31.append_range(lines);
     lines36.append_range(lines);
     lines23.append_range(lines);
@@ -144,7 +169,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f5in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines51.append_range(lines);
     lines57.append_range(lines);
     lines58.append_range(lines);
@@ -152,7 +177,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f8in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines84.append_range(lines);
     lines86.append_range(lines);
     lines58.append_range(lines);
@@ -161,7 +186,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f2in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines24.append_range(lines);
     lines27.append_range(lines);
     lines23.append_range(lines);
@@ -169,7 +194,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f3in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines31.append_range(lines);
     lines36.append_range(lines);
     lines23.append_range(lines);
@@ -177,7 +202,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f5in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines51.append_range(lines);
     lines57.append_range(lines);
     lines58.append_range(lines);
@@ -185,7 +210,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f8in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines84.append_range(lines);
     lines86.append_range(lines);
     lines58.append_range(lines);
@@ -194,28 +219,28 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   {
     auto resolutions = MinResolutions(f1out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines51.append_range(lines);
     lines31.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f4out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines84.append_range(lines);
     lines24.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f6out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines36.append_range(lines);
     lines86.append_range(lines);
   }
   {
     auto resolutions = MinResolutions(f7out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
-    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
+    auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
     lines27.append_range(lines);
     lines57.append_range(lines);
   }
@@ -274,7 +299,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     for (int j = 0; j < polygon51[i].polygon.size(); j++) {
       std::cout << polygon51[i].polygon[j] << " ";
     }
-    std::cout << "\n";
+    std::cout << std::endl;
   }
   // std::cout << "Polygons57: " << "\n";
   for (int i = 0; i < polygon57.size(); i++) {
@@ -346,7 +371,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     for (int j = 0; j < polygon23[i].polygon.size(); j++) {
       std::cout << polygon23[i].polygon[j] << " ";
     }
-    std::cout << "\n";
+    std::cout << std::endl;
   }
 
   std::cout << "Triangulated polygons with unique vertices: " << "\n";
@@ -391,7 +416,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     std::cout << "triangle " << i << ": " << triangles27[i].a << " " << triangles27[i].b << " " << triangles27[i].c << "\n";
   }
   for (int i = 0; i < triangles23.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles23[i].a << " " << triangles23[i].b << " " << triangles23[i].c << "\n";
+    std::cout << "triangle " << i << ": " << triangles23[i].a << " " << triangles23[i].b << " " << triangles23[i].c << std::endl;
   }
   // Calculate prisms
   std::vector<hcpwa::LineSet<8>> prisms51;
@@ -455,33 +480,51 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
       const std::vector<hcpwa::LineSet<8>>& prisms3,
       const std::vector<hcpwa::LineSet<8>>& prisms4,
       std::vector<std::vector<size_t>>& out_indices,
-      std::vector<std::vector<hcpwa::Vec<8>>>& out_points) {
-    for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
-      for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
-        for (size_t idx2 = 0; idx2 < prisms2.size(); idx2++) {
-          for (size_t idx3 = 0; idx3 < prisms3.size(); idx3++) {
-            for (size_t idx4 = 0; idx4 < prisms4.size(); idx4++) {
-              hcpwa::LineSet<8> concatenated_prisms;
-              // IMPORTANT: bound the 8D polytope so it has vertices
-              concatenated_prisms.append_range(bounds);
-              concatenated_prisms.append_range(prisms0[idx0]);
-              concatenated_prisms.append_range(prisms1[idx1]);
-              concatenated_prisms.append_range(prisms2[idx2]);
-              concatenated_prisms.append_range(prisms3[idx3]);
-              concatenated_prisms.append_range(prisms4[idx4]);
-              auto intersection = hcpwa::LinesToPoints(concatenated_prisms);
-              if (intersection.size() > 0) {
-                out_points.push_back(intersection);
-                // Store the indices of the prisms that form the intersection
-                std::vector<size_t> prism_indices = {idx0, idx1, idx2, idx3, idx4};
-                out_indices.push_back(prism_indices);
+      std::vector<std::vector<hcpwa::Vec<8>>>& out_points
+    ) {
+      auto start = std::chrono::system_clock::now();
+      std::mutex mux;
+      std::vector<std::thread> workers;
+      for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
+        // std::thread worker([&, idx0]{
+        auto worker = ([&, idx0]{
+        for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
+          mux.lock();
+          std::cout << "[" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start).count() / 1000.0 << "s] " << idx0 << " " << idx1 << std::endl;
+          start = std::chrono::system_clock::now();
+          mux.unlock();
+          for (size_t idx2 = 0; idx2 < prisms2.size(); idx2++) {
+            for (size_t idx3 = 0; idx3 < prisms3.size(); idx3++) {
+              for (size_t idx4 = 0; idx4 < prisms4.size(); idx4++) {
+                hcpwa::LineSet<8> concatenated_prisms;
+                // IMPORTANT: bound the 8D polytope so it has vertices
+                concatenated_prisms.append_range(bounds);
+                concatenated_prisms.append_range(prisms0[idx0]);
+                concatenated_prisms.append_range(prisms1[idx1]);
+                concatenated_prisms.append_range(prisms2[idx2]);
+                concatenated_prisms.append_range(prisms3[idx3]);
+                concatenated_prisms.append_range(prisms4[idx4]);
+                auto intersection = hcpwa::LinesToPoints(concatenated_prisms);
+                if (intersection.size() > 0) {
+                  std::lock_guard g(mux);
+                  out_points.push_back(intersection);
+                  // Store the indices of the prisms that form the intersection
+                  std::vector<size_t> prism_indices = {idx0, idx1, idx2, idx3, idx4};
+                  out_indices.push_back(prism_indices);
+                }
               }
             }
           }
         }
-      }
+    });
+    // workers.push_back(std::move(worker));
+    worker();
+    }
+    for (auto& worker : workers) {
+      worker.join();
     }
   };
+
 
   // Intersect all prisms phase 0
   std::vector<std::vector<size_t>> intersection_prism_indices_phase0;

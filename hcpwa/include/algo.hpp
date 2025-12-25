@@ -38,7 +38,8 @@ std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
 hcpwa::LineSet<8> CalcPrism(const Triangle& triangle,
                             const std::array<int, 2>& dims);
 
-std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data);
+template<int N>
+std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data);
 
 std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons);
 

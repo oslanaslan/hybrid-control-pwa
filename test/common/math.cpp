@@ -16,6 +16,13 @@ TEST(math, vec) {
   ASSERT_EQ(a + b, c);
 }
 
+TEST(math, line) {
+  hcpwa::Line<2> a{1, 0, 2};
+  hcpwa::Line<8> b = hcpwa::Expand<8>(a);
+  ASSERT_EQ(b[0], a[0]);
+  ASSERT_EQ(b[8], a[2]);
+}
+
 TEST(math, floating) {
   auto test = []<typename T>(T) {
     T a = 1;

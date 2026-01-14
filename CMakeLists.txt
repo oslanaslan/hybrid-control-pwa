@@ -14,6 +14,7 @@ set(CMAKE_CXX_USE_RESPONSE_FILE_FOR_INCLUDES OFF)
 
 add_subdirectory(vendor)
 add_subdirectory(${PROJECT_NAME})
+add_subdirectory(solver)
 
 set(TESTS_OPTION "${PROJECT_NAME}_BUILD_TESTS")
 option(${TESTS_OPTION} "build tests" ON)

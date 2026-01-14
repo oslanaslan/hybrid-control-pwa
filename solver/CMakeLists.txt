@@ -2,7 +2,7 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 "src/**.cpp"
 )
 
-add_executable(${PROJECT_NAME}-solver STATIC ${SRC_FILES})
+add_executable(${PROJECT_NAME}-solver ${SRC_FILES})
 
 target_compile_features(${PROJECT_NAME}-solver PUBLIC cxx_std_23)
 set_target_properties(${PROJECT_NAME}-solver PROPERTIES CXX_EXTENSIONS OFF)

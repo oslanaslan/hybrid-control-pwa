@@ -3,6 +3,7 @@
 #include "float.hpp"
 // #include <linalg.h>
 #include <bitset>
+#include <cstddef>
 #include <format>
 #include <utility>
 #include <vector.hpp>
@@ -150,6 +151,18 @@ using AABB = std::pair<Vec<N>, Vec<N>>;
 
 struct Triangle {
   Vec<2> a, b, c;
+
+  constexpr std::size_t size() const {  // NOLINT
+    return 3;
+  }
+  constexpr decltype(auto) operator[](std::size_t i) const {
+    switch (i) {
+      case 0: return a;
+      case 1: return b;
+      case 2: return c;
+    }
+    std::unreachable();
+  }
 };
 
 struct TriangleWithUniqueVertices : public Triangle {

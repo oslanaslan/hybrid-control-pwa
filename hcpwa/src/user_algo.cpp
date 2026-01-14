@@ -1,5 +1,7 @@
 #include <algo.hpp>
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <format>
 #include <mutex>
 #include <ostream>
@@ -8,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include "cddwrap/cdd.hpp"
+#include "types.hpp"
 #include "utility.hpp"
 
 namespace hcpwa {
@@ -472,71 +475,258 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     prisms23.push_back(prism);
   }
   // Helper lambda to compute intersections for a set of prism collections
-  auto compute_intersections = [](
-      const hcpwa::LineSet<8>& bounds,
-      const std::vector<hcpwa::LineSet<8>>& prisms0,
-      const std::vector<hcpwa::LineSet<8>>& prisms1,
-      const std::vector<hcpwa::LineSet<8>>& prisms2,
-      const std::vector<hcpwa::LineSet<8>>& prisms3,
-      const std::vector<hcpwa::LineSet<8>>& prisms4,
-      std::vector<std::vector<size_t>>& out_indices,
-      std::vector<std::vector<hcpwa::Vec<8>>>& out_points
-    ) {
-      auto start = std::chrono::system_clock::now();
-      std::mutex mux;
-      std::vector<std::thread> workers;
-      for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
-        // std::thread worker([&, idx0]{
-        auto worker = ([&, idx0]{
-        for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
-          mux.lock();
-          std::cout << "[" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start).count() / 1000.0 << "s] " << idx0 << " " << idx1 << std::endl;
-          start = std::chrono::system_clock::now();
-          mux.unlock();
-          for (size_t idx2 = 0; idx2 < prisms2.size(); idx2++) {
-            for (size_t idx3 = 0; idx3 < prisms3.size(); idx3++) {
-              for (size_t idx4 = 0; idx4 < prisms4.size(); idx4++) {
-                hcpwa::LineSet<8> concatenated_prisms;
-                // IMPORTANT: bound the 8D polytope so it has vertices
-                concatenated_prisms.append_range(bounds);
-                concatenated_prisms.append_range(prisms0[idx0]);
-                concatenated_prisms.append_range(prisms1[idx1]);
-                concatenated_prisms.append_range(prisms2[idx2]);
-                concatenated_prisms.append_range(prisms3[idx3]);
-                concatenated_prisms.append_range(prisms4[idx4]);
-                auto intersection = hcpwa::LinesToPoints(concatenated_prisms);
-                if (intersection.size() > 0) {
-                  std::lock_guard g(mux);
-                  out_points.push_back(intersection);
-                  // Store the indices of the prisms that form the intersection
-                  std::vector<size_t> prism_indices = {idx0, idx1, idx2, idx3, idx4};
-                  out_indices.push_back(prism_indices);
-                }
-              }
-            }
-          }
+  // auto compute_intersections = [](
+  //     const hcpwa::LineSet<8>& bounds,
+  //     const std::vector<hcpwa::LineSet<8>>& prisms0,
+  //     const std::vector<hcpwa::LineSet<8>>& prisms1,
+  //     const std::vector<hcpwa::LineSet<8>>& prisms2,
+  //     const std::vector<hcpwa::LineSet<8>>& prisms3,
+  //     const std::vector<hcpwa::LineSet<8>>& prisms4,
+  //     std::vector<std::vector<size_t>>& out_indices,
+  //     std::vector<std::vector<hcpwa::Vec<8>>>& out_points
+  //   ) {
+  //     auto start = std::chrono::system_clock::now();
+  //     std::mutex mux;
+  //     std::vector<std::thread> workers;
+  //     for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
+  //       // std::thread worker([&, idx0]{
+  //       auto worker = ([&, idx0]{
+  //       for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
+  //         mux.lock();
+  //         std::cout << "[" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start).count() / 1000.0 << "s] " << idx0 << " " << idx1 << std::endl;
+  //         start = std::chrono::system_clock::now();
+  //         mux.unlock();
+  //         for (size_t idx2 = 0; idx2 < prisms2.size(); idx2++) {
+  //           for (size_t idx3 = 0; idx3 < prisms3.size(); idx3++) {
+  //             for (size_t idx4 = 0; idx4 < prisms4.size(); idx4++) {
+  //               hcpwa::LineSet<8> concatenated_prisms;
+  //               // IMPORTANT: bound the 8D polytope so it has vertices
+  //               concatenated_prisms.append_range(bounds);
+  //               concatenated_prisms.append_range(prisms0[idx0]);
+  //               concatenated_prisms.append_range(prisms1[idx1]);
+  //               concatenated_prisms.append_range(prisms2[idx2]);
+  //               concatenated_prisms.append_range(prisms3[idx3]);
+  //               concatenated_prisms.append_range(prisms4[idx4]);
+  //               auto intersection = hcpwa::LinesToPoints(concatenated_prisms);
+  //               if (intersection.size() > 0) {
+  //                 std::lock_guard g(mux);
+  //                 out_points.push_back(intersection);
+  //                 // Store the indices of the prisms that form the intersection
+  //                 std::vector<size_t> prism_indices = {idx0, idx1, idx2, idx3, idx4};
+  //                 out_indices.push_back(prism_indices);
+  //               }
+  //             }
+  //           }
+  //         }
+  //       }
+  //   });
+  //   // workers.push_back(std::move(worker));
+  //   worker();
+  //   }
+  //   for (auto& worker : workers) {
+  //     worker.join();
+  //   }
+  // };
+  hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
+  const auto aabb3d_bounds = hcpwa::AABBBounds(aabb3d);
+
+  auto computend = []<int N>(
+    std::array<int, N> dims,
+    const hcpwa::LineSet<N>& bounds,
+    const std::vector<hcpwa::LineSet<8>>& prisms0,
+    const std::vector<hcpwa::LineSet<8>>& prisms1,
+    std::vector<std::vector<size_t>>& out_indices,
+    std::vector<std::vector<hcpwa::Vec<N>>>& out_points
+  ){
+    for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
+      for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
+        hcpwa::LineSet<N> concatenated_prisms = bounds;
+
+        for (auto& i : prisms0[idx0]) {
+          concatenated_prisms.push_back(hcpwa::DimensionCast<N, 8>(i, dims));
         }
-    });
-    // workers.push_back(std::move(worker));
-    worker();
-    }
-    for (auto& worker : workers) {
-      worker.join();
+        for (auto& i : prisms1[idx1]) {
+          concatenated_prisms.push_back(hcpwa::DimensionCast<N, 8>(i, dims));
+        }
+        auto intersection = hcpwa::LinesToPoints<N>(concatenated_prisms);
+        if (intersection.size() > 0) {
+          out_points.push_back(intersection);
+          // Store the indices of the prisms that form the intersection
+          std::vector<size_t> prism_indices = {idx0, idx1};
+          out_indices.push_back(prism_indices);
+        }
+      }
     }
   };
 
+  std::cout << std::format("Prism 31: {}", prisms31.size()) << std::endl;
+  std::cout << std::format("Prism 36: {}", prisms36.size()) << std::endl;
+  std::cout << std::format("Prism 24: {}", prisms24.size()) << std::endl;
+  std::cout << std::format("Prism 27: {}", prisms27.size()) << std::endl;
 
-  // Intersect all prisms phase 0
+  std::vector<std::vector<size_t>> intersection_prism_indices_136;
+  std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_136;
+  computend(
+    {0, 2, 5},
+    aabb3d_bounds,
+    prisms31,
+    prisms36, 
+  intersection_prism_indices_136, intersection_points_136);
+
+  std::vector<std::vector<size_t>> intersection_prism_indices_247;
+  std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_247;
+  computend(
+    {1, 3, 6},
+    aabb3d_bounds,
+    prisms24,
+    prisms27, 
+  intersection_prism_indices_247, intersection_points_247);
+
+  std::vector<std::vector<size_t>> intersection_prism_indices_157;
+  std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_157;
+  computend(
+    {0, 4, 6},
+    aabb3d_bounds,
+    prisms51,
+    prisms57, 
+  intersection_prism_indices_157, intersection_points_157);
+
+  std::vector<std::vector<size_t>> intersection_prism_indices_468;
+  std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_468;
+  computend(
+    {3, 5, 7},
+    aabb3d_bounds,
+    prisms84,
+    prisms86, 
+  intersection_prism_indices_468, intersection_points_468);
+
+  std::cout << "Intersection counted:" << std::endl;
+  std::cout << "\t136 count: " << intersection_points_136.size() << std::endl;
+  std::cout << "\t247 count: " << intersection_points_247.size() << std::endl;
+  std::cout << "\t58 count: " << triangles58.size() << std::endl;
+  std::cout << "\t157 count: " << intersection_points_157.size() << std::endl;
+  std::cout << "\t468 count: " << intersection_points_468.size() << std::endl;
+  std::cout << "\t23 count: " << triangles23.size() << std::endl;
+
+
   std::vector<std::vector<size_t>> intersection_prism_indices_phase0;
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase0;
-  compute_intersections(aabb_bounds, prisms31, prisms36, prisms24, prisms27, prisms58,
-                        intersection_prism_indices_phase0, intersection_points_phase0);
-
-  // Intersect all prisms phase 1
   std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
-  compute_intersections(aabb_bounds, prisms51, prisms57, prisms84, prisms86, prisms23,
-                        intersection_prism_indices_phase1, intersection_points_phase1);
+
+
+
+  for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
+    for (size_t i247 = 0; i247 < intersection_prism_indices_247.size(); i247++) {
+      // auto t_start = std::chrono::high_resolution_clock::now();
+      for (size_t i58 = 0; i58 < triangles58.size(); i58++) {
+
+        intersection_points_phase0.emplace_back();
+        intersection_prism_indices_phase0.emplace_back();
+        intersection_prism_indices_phase0.back().append_range(intersection_prism_indices_136[i136]);
+        intersection_prism_indices_phase0.back().append_range(intersection_prism_indices_247[i247]);
+        intersection_prism_indices_phase0.back().push_back(i58);
+
+        for (size_t j136 = 0; j136 < intersection_prism_indices_136[i136].size(); j136++) {
+          for (size_t j247 = 0; j247 < intersection_prism_indices_247[i247].size(); j247++) {
+            for (size_t j58 = 0; j58 < triangles58[i58].size(); j58++) {
+              const auto& v136 = intersection_points_136[i136][j136];
+              const auto& v247 = intersection_points_247[i247][j247];
+              const auto& v58 = triangles58[i58][j58];
+              hcpwa::Vec<8> v = kZeroVec;
+              v[0] = v136[0];
+              v[1] = v247[0];
+              v[2] = v136[1];
+              v[3] = v247[1];
+              v[4] = v58[0];
+              v[5] = v136[2];
+              v[6] = v247[2];
+              v[7] = v58[1];
+              intersection_points_phase0.back().push_back(v);
+            }
+          }
+        }
+      }
+      // auto t_end = std::chrono::high_resolution_clock::now();
+      // std::chrono::duration<double> t_diff = t_end - t_start;
+      // std::cout << "[Timing] i136=" << i136 << ", i247=" << i247 << ": " << t_diff.count() << "s" << std::endl;
+    }
+  }
+
+  for (size_t i157 = 0; i157 < intersection_points_157.size(); i157++) {
+    for (size_t i468 = 0; i468 < intersection_prism_indices_468.size(); i468++) {
+      for (size_t i23 = 0; i23 < triangles23.size(); i23++) {
+
+        intersection_points_phase1.emplace_back();
+        intersection_prism_indices_phase1.emplace_back();
+        intersection_prism_indices_phase1.back().append_range(intersection_prism_indices_157[i157]);
+        intersection_prism_indices_phase1.back().append_range(intersection_prism_indices_468[i468]);
+        intersection_prism_indices_phase1.back().push_back(i23);
+
+        for (size_t j157 = 0; j157 < intersection_prism_indices_157[i157].size(); j157++) {
+          for (size_t j468 = 0; j468 < intersection_prism_indices_468[i468].size(); j468++) {
+            for (size_t j23 = 0; j23 < triangles23[i23].size(); j23++) {
+              const auto& v157 = intersection_points_157[i157][j157];
+              const auto& v468 = intersection_points_468[i468][j468];
+              const auto& v23 = triangles23[i23][j23];
+              hcpwa::Vec<8> v = kZeroVec;
+              v[0] = v157[0];
+              v[1] = v23[0];
+              v[2] = v23[1];
+              v[3] = v468[0];
+              v[4] = v157[1];
+              v[5] = v468[1];
+              v[6] = v157[2];
+              v[7] = v468[2];
+              intersection_points_phase1.back().push_back(v);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // DEBUG
+  // for (size_t i = 0; i < intersection_prism_indices_phase0.size(); i++) {
+  //   bool is_equal = false;
+  //   for (size_t j = 0; j < intersection_prism_indices_phase1.size(); j++) {
+  //     auto ith = intersection_prism_indices_phase0[i];
+  //     auto jth = intersection_prism_indices_phase1[j];
+  //     if (ith == jth) {
+  //       is_equal = true;
+  //     }
+  //   }
+  //   if (!is_equal) {
+  //     std::cout << std::format("{} not is in phase 0, but not in phase 1", i) << std::endl;
+  //   }
+  // }
+  // // DEBUG
+  // for (size_t i = 0; i < intersection_prism_indices_phase1.size(); i++) {
+  //   bool is_equal = false;
+  //   for (size_t j = 0; j < intersection_prism_indices_phase0.size(); j++) {
+  //     auto ith = intersection_prism_indices_phase1[i];
+  //     auto jth = intersection_prism_indices_phase0[j];
+  //     if (ith == jth) {
+  //       is_equal = true;
+  //     }
+  //   }
+  //   if (!is_equal) {
+  //     std::cout << std::format("{} not is in phase 1, but not in phase 0", i) << std::endl;
+  //   }
+  // }
+
+
+  // Intersect all prisms phase 0
+  // std::vector<std::vector<size_t>> intersection_prism_indices_phase0;
+  // std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase0;
+  // compute_intersections(aabb_bounds, prisms31, prisms36, prisms24, prisms27, prisms58,
+  //                       intersection_prism_indices_phase0, intersection_points_phase0);
+
+  // // Intersect all prisms phase 1
+  // std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
+  // std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
+  // compute_intersections(aabb_bounds, prisms51, prisms57, prisms84, prisms86, prisms23,
+  //                       intersection_prism_indices_phase1, intersection_points_phase1);
   
   AreasVerticesResult result;
   // Phase 0

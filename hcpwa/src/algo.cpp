@@ -132,7 +132,7 @@ std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data) {
     for (int j = 0; j < N; j++) {
       inequalities[i][j] = (double)data[i][j];
     }
-    inequalities[i][8] = -(double)data[i][N];
+    inequalities[i][N] = -(double)data[i][N];
   }
 
   auto points = GetHullPoints(inequalities);
@@ -147,6 +147,7 @@ std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data) {
     }
     // result.emplace_back(points[i, 0], points[i, 1], points[i, 2], points[i, 3],
     //                     points[i, 4], points[i, 5], points[i, 6], points[i, 7]);
+    result.push_back(point);
   }
   return result;
 }

@@ -152,5 +152,6 @@ class CustomFloat {
   T value_;
 };
 
-using Float = float;
+// using Float = float;
+using Float = double;
 }  // namespace hcpwa

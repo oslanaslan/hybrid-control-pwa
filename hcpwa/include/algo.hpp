@@ -5,6 +5,7 @@
 #include "uniqie_pool.hpp"
 #include <vector>
 
+namespace hcpwa {
 // Structure to hold computation results for areas vertices
 struct AreasVerticesResult {
   // Phase 0
@@ -25,7 +26,6 @@ struct AreasVerticesResult {
   std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
 };
 
-namespace hcpwa {
 std::vector<hcpwa::PolygonResolution> SplitAABBWithLines(
     AABB<2> aabb, const LineSet<2>& lines);
 
@@ -44,10 +44,11 @@ std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data);
 std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons);
 
 // Compute areas vertices - pure C++ computation logic
-AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
-                                           float b51, float b57, float b84, float b86,
-                                           float b31, float b36, float b24, float b27,
-                                           float f2min, float f3min, float f5min, float f8min,
-                                           float f2max, float f3max, float f5max, float f8max);
+AreasVerticesResult compute_areas_vertices(double N, double F, double v, double w,
+                                           double b51, double b57, double b84, double b86,
+                                           double b31, double b36, double b24, double b27,
+                                           double f2min, double f3min, double f5min, double f8min,
+                                           double f2max, double f3max, double f5max, double f8max,
+                                           bool verbose = false);
 
 }  // namespace hcpwa

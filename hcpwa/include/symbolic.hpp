@@ -79,6 +79,9 @@ struct C {
   constexpr C(Float value)
       : value(value) {
   }
+  constexpr C(int value)
+      : value(static_cast<Float>(value)) {
+  }
   constexpr auto Linearize() {
     return Line<1>{0, value};
   }
@@ -199,10 +202,10 @@ constexpr auto MinResolutions(SymMinExpr auto expr) {
     result.push_back(Linearize(ex));
     return ex;
   });
-  std::cout << "result: " << std::format("{}", result) << "\n";
-  for (const auto& line : result) {
-    std::cout << "line: " << std::format("{}", line) << "\n";
-  }
+  // std::cout << "result: " << std::format("{}", result) << "\n";
+  // for (const auto& line : result) {
+  //   std::cout << "line: " << std::format("{}", line) << "\n";
+  // }
   std::vector<std::pair<LineSet<kDim>, Line<kDim>>> resolutions;
   for (std::size_t i = 0; i < result.size(); i++) {
     LineSet<kDim> eqs;

@@ -28,3 +28,42 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(function2)
+
+# HIGHS
+FetchContent_Declare(
+  highs
+  GIT_REPOSITORY https://github.com/ERGO-Code/HiGHS.git
+  GIT_TAG master
+)
+FetchContent_MakeAvailable(highs)
+
+# EIGEN
+# Disable all testing globally (also helps other deps)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+
+# Eigen-specific knobs (names vary by Eigen version, but these are commonly honored)
+set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+  eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG 5.0.1
+)
+FetchContent_MakeAvailable(eigen)
+# FetchContent_Populate(eigen)
+
+# add_library(project_eigen INTERFACE)
+# target_include_directories(project_eigen INTERFACE ${eigen_SOURCE_DIR})
+
+# spdlog
+FetchContent_Declare(
+  spdlog
+  GIT_REPOSITORY https://github.com/gabime/spdlog.git
+  GIT_TAG v1.14.0
+)
+FetchContent_MakeAvailable(spdlog)
+
+# add_library(spdlog INTERFACE)
+# target_include_directories(spdlog INTERFACE ${spdlog_SOURCE_DIR}/include)

@@ -36,7 +36,7 @@ TEST(user_algo, compute_areas_vertices) {
   constexpr hcpwa::Float f5max = 10;
   constexpr hcpwa::Float f8max = 10;
 
-  AreasVerticesResult result = hcpwa::compute_areas_vertices(
+  hcpwa::AreasVerticesResult result = hcpwa::compute_areas_vertices(
       N, F, v, w,
       b51, b57, b84, b86,
       b31, b36, b24, b27,
@@ -144,7 +144,7 @@ TEST(user_algo, compute_areas_vertices_exhaustive) {
   constexpr hcpwa::Float f5max = 10;
   constexpr hcpwa::Float f8max = 10;
 
-  AreasVerticesResult result = hcpwa::compute_areas_vertices(
+  hcpwa::AreasVerticesResult result = hcpwa::compute_areas_vertices(
       N, F, v, w,
       b51, b57, b84, b86,
       b31, b36, b24, b27,

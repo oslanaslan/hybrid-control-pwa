@@ -1,8 +1,11 @@
 #include <algo.hpp>
 #include <algorithm>
+#include <vector>
 #include "cddwrap/lineareq.hpp"
 #include "morph.hpp"
 #include "types.hpp"
+#include <Eigen/Dense>
+#include <Highs.h>
 
 namespace hcpwa {
 

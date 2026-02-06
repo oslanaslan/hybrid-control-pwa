@@ -18,35 +18,37 @@ namespace hcpwa {
 // NOLINTNEXTLINE
 using namespace hcpwa::symbols;
 
-AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
-                                           float b51, float b57, float b84, float b86,
-                                           float b31, float b36, float b24, float b27,
-                                           float f2min, float f3min, float f5min, float f8min,
-                                           float f2max, float f3max, float f5max, float f8max) {
+AreasVerticesResult compute_areas_vertices(double N, double F, double v, double w,
+                                           double b51, double b57, double b84, double b86,
+                                           double b31, double b36, double b24, double b27,
+                                           double f2min, double f3min, double f5min, double f8min,
+                                           double f2max, double f3max, double f5max, double f8max, bool verbose) {
 
-  std::cout << "N = " << N << std::endl;
-  std::cout << "F = " << F << std::endl;
-  std::cout << "v = " << v << std::endl;
-  std::cout << "w = " << w << std::endl;
-  std::cout << "b51 = " << b51 << std::endl;
-  std::cout << "b57 = " << b57 << std::endl;
-  std::cout << "b84 = " << b84 << std::endl;
-  std::cout << "b86 = " << b86 << std::endl;
-  std::cout << "b31 = " << b31 << std::endl;
-  std::cout << "b36 = " << b36 << std::endl;
-  std::cout << "b24 = " << b24 << std::endl;
-  std::cout << "b27 = " << b27 << std::endl;
-  std::cout << "f2min = " << f2min << std::endl;
-  std::cout << "f3min = " << f3min << std::endl;
-  std::cout << "f5min = " << f5min << std::endl;
-  std::cout << "f8min = " << f8min << std::endl;
-  std::cout << "f2max = " << f2max << std::endl;
-  std::cout << "f3max = " << f3max << std::endl;
-  std::cout << "f5max = " << f5max << std::endl;
-  std::cout << "f8max = " << f8max << std::endl;
+  if (verbose) {
+    std::cout << "N = " << N << std::endl;
+    std::cout << "F = " << F << std::endl;
+    std::cout << "v = " << v << std::endl;
+    std::cout << "w = " << w << std::endl;
+    std::cout << "b51 = " << b51 << std::endl;
+    std::cout << "b57 = " << b57 << std::endl;
+    std::cout << "b84 = " << b84 << std::endl;
+    std::cout << "b86 = " << b86 << std::endl;
+    std::cout << "b31 = " << b31 << std::endl;
+    std::cout << "b36 = " << b36 << std::endl;
+    std::cout << "b24 = " << b24 << std::endl;
+    std::cout << "b27 = " << b27 << std::endl;
+    std::cout << "f2min = " << f2min << std::endl;
+    std::cout << "f3min = " << f3min << std::endl;
+    std::cout << "f5min = " << f5min << std::endl;
+    std::cout << "f8min = " << f8min << std::endl;
+    std::cout << "f2max = " << f2max << std::endl;
+    std::cout << "f3max = " << f3max << std::endl;
+    std::cout << "f5max = " << f5max << std::endl;
+    std::cout << "f8max = " << f8max << std::endl;
+  }
 
-  hcpwa::AABB<8> aabb = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
-  hcpwa::AABB<2> aabb2d = {{0, 0}, {N, N}};
+  hcpwa::AABB<8> aabb = {{0, 0, 0, 0, 0, 0, 0, 0}, {static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N)}};
+  hcpwa::AABB<2> aabb2d = {{0, 0}, {static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N)}};
   const auto aabb_bounds = hcpwa::AABBBounds(aabb);
 
   constexpr auto n1 = X<0>{};
@@ -248,29 +250,28 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     lines57.append_range(lines);
   }
 
-  // DEBUG: print lines counts
-  std::cout << "Lines51 count: " << lines51.size() << "\n";
-  std::cout << "Lines57 count: " << lines57.size() << "\n";
-  std::cout << "Lines84 count: " << lines84.size() << "\n";
-  std::cout << "Lines86 count: " << lines86.size() << "\n";
-  std::cout << "Lines58 count: " << lines58.size() << "\n";
-  std::cout << "Lines31 count: " << lines31.size() << "\n";
-  std::cout << "Lines36 count: " << lines36.size() << "\n";
-  std::cout << "Lines24 count: " << lines24.size() << "\n";
-  std::cout << "Lines27 count: " << lines27.size() << "\n";
-  std::cout << "Lines23 count: " << lines23.size() << "\n";
-
-  // DEBUG: print lines coefficients
-  std::cout << "Lines51 coefficients: " << std::format("{}", lines51) << "\n";
-  std::cout << "Lines57 coefficients: " << std::format("{}", lines57) << "\n";
-  std::cout << "Lines84 coefficients: " << std::format("{}", lines84) << "\n";
-  std::cout << "Lines86 coefficients: " << std::format("{}", lines86) << "\n";
-  std::cout << "Lines58 coefficients: " << std::format("{}", lines58) << "\n";
-  std::cout << "Lines31 coefficients: " << std::format("{}", lines31) << "\n";
-  std::cout << "Lines36 coefficients: " << std::format("{}", lines36) << "\n";
-  std::cout << "Lines24 coefficients: " << std::format("{}", lines24) << "\n";
-  std::cout << "Lines27 coefficients: " << std::format("{}", lines27) << "\n";
-  std::cout << "Lines23 coefficients: " << std::format("{}", lines23) << "\n";
+  if (verbose) {
+    std::cout << "Lines51 count: " << lines51.size() << "\n";
+    std::cout << "Lines57 count: " << lines57.size() << "\n";
+    std::cout << "Lines84 count: " << lines84.size() << "\n";
+    std::cout << "Lines86 count: " << lines86.size() << "\n";
+    std::cout << "Lines58 count: " << lines58.size() << "\n";
+    std::cout << "Lines31 count: " << lines31.size() << "\n";
+    std::cout << "Lines36 count: " << lines36.size() << "\n";
+    std::cout << "Lines24 count: " << lines24.size() << "\n";
+    std::cout << "Lines27 count: " << lines27.size() << "\n";
+    std::cout << "Lines23 count: " << lines23.size() << "\n";
+    std::cout << "Lines51 coefficients: " << std::format("{}", lines51) << "\n";
+    std::cout << "Lines57 coefficients: " << std::format("{}", lines57) << "\n";
+    std::cout << "Lines84 coefficients: " << std::format("{}", lines84) << "\n";
+    std::cout << "Lines86 coefficients: " << std::format("{}", lines86) << "\n";
+    std::cout << "Lines58 coefficients: " << std::format("{}", lines58) << "\n";
+    std::cout << "Lines31 coefficients: " << std::format("{}", lines31) << "\n";
+    std::cout << "Lines36 coefficients: " << std::format("{}", lines36) << "\n";
+    std::cout << "Lines24 coefficients: " << std::format("{}", lines24) << "\n";
+    std::cout << "Lines27 coefficients: " << std::format("{}", lines27) << "\n";
+    std::cout << "Lines23 coefficients: " << std::format("{}", lines23) << "\n";
+  }
 
   auto polygon51 = hcpwa::SplitAABBWithLines(aabb2d, hcpwa::DimensionCast<2, 8>(lines51, {1 - 1, 5 - 1}));
   auto polygon57 = hcpwa::SplitAABBWithLines(aabb2d, hcpwa::DimensionCast<2, 8>(lines57, {5 - 1, 7 - 1}));
@@ -283,21 +284,18 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   auto polygon27 = hcpwa::SplitAABBWithLines(aabb2d, hcpwa::DimensionCast<2, 8>(lines27, {2 - 1, 7 - 1}));
   auto polygon23 = hcpwa::SplitAABBWithLines(aabb2d, hcpwa::DimensionCast<2, 8>(lines23, {2 - 1, 3 - 1}));
 
-  // DEBUG: print polygons counts
-  std::cout << "Polygon51 count: " << polygon51.size() << "\n";
-  std::cout << "Polygon57 count: " << polygon57.size() << "\n";
-  std::cout << "Polygon84 count: " << polygon84.size() << "\n";
-  std::cout << "Polygon86 count: " << polygon86.size() << "\n";
-  std::cout << "Polygon58 count: " << polygon58.size() << "\n";
-  std::cout << "Polygon31 count: " << polygon31.size() << "\n";
-  std::cout << "Polygon36 count: " << polygon36.size() << "\n";
-  std::cout << "Polygon24 count: " << polygon24.size() << "\n";
-  std::cout << "Polygon27 count: " << polygon27.size() << "\n";
-  std::cout << "Polygon23 count: " << polygon23.size() << "\n";
-
-  // DEBUG: print polygons
-  // std::cout << "Polygons51: " << "\n";
-  for (int i = 0; i < polygon51.size(); i++) {
+  if (verbose) {
+    std::cout << "Polygon51 count: " << polygon51.size() << "\n";
+    std::cout << "Polygon57 count: " << polygon57.size() << "\n";
+    std::cout << "Polygon84 count: " << polygon84.size() << "\n";
+    std::cout << "Polygon86 count: " << polygon86.size() << "\n";
+    std::cout << "Polygon58 count: " << polygon58.size() << "\n";
+    std::cout << "Polygon31 count: " << polygon31.size() << "\n";
+    std::cout << "Polygon36 count: " << polygon36.size() << "\n";
+    std::cout << "Polygon24 count: " << polygon24.size() << "\n";
+    std::cout << "Polygon27 count: " << polygon27.size() << "\n";
+    std::cout << "Polygon23 count: " << polygon23.size() << "\n";
+    for (int i = 0; i < polygon51.size(); i++) {
     std::cout << "polygon " << i << ": ";
     for (int j = 0; j < polygon51[i].polygon.size(); j++) {
       std::cout << polygon51[i].polygon[j] << " ";
@@ -368,7 +366,6 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     }
     std::cout << "\n";
   }
-  // std::cout << "Polygons23: " << "\n";
   for (int i = 0; i < polygon23.size(); i++) {
     std::cout << "polygon " << i << ": ";
     for (int j = 0; j < polygon23[i].polygon.size(); j++) {
@@ -376,8 +373,11 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     }
     std::cout << std::endl;
   }
+  }
 
-  std::cout << "Triangulated polygons with unique vertices: " << "\n";
+  if (verbose) {
+    std::cout << "Triangulated polygons with unique vertices: " << "\n";
+  }
   // Triangulated polygons with unique vertices
   auto triangles51 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon51);
   auto triangles57 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon57);
@@ -390,36 +390,38 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   auto triangles27 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon27);
   auto triangles23 = hcpwa::GetTrianglesWithUniqueVertices(aabb2d, polygon23);
 
-  std::cout << "Triangles count: " << triangles51.size() << " " << triangles57.size() << " " << triangles84.size() << " " << triangles86.size() << " " << triangles58.size() << " " << triangles31.size() << " " << triangles36.size() << " " << triangles24.size() << " " << triangles27.size() << " " << triangles23.size() << "\n";
-  for (int i = 0; i < triangles51.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles51[i].a << " " << triangles51[i].b << " " << triangles51[i].c << "\n";
-  }
-  for (int i = 0; i < triangles57.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles57[i].a << " " << triangles57[i].b << " " << triangles57[i].c << "\n";
-  }
-  for (int i = 0; i < triangles84.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles84[i].a << " " << triangles84[i].b << " " << triangles84[i].c << "\n";
-  }
-  for (int i = 0; i < triangles86.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles86[i].a << " " << triangles86[i].b << " " << triangles86[i].c << "\n";
-  }
-  for (int i = 0; i < triangles58.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles58[i].a << " " << triangles58[i].b << " " << triangles58[i].c << "\n";
-  }
-  for (int i = 0; i < triangles31.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles31[i].a << " " << triangles31[i].b << " " << triangles31[i].c << "\n";
-  }
-  for (int i = 0; i < triangles36.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles36[i].a << " " << triangles36[i].b << " " << triangles36[i].c << "\n";
-  }
-  for (int i = 0; i < triangles24.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles24[i].a << " " << triangles24[i].b << " " << triangles24[i].c << "\n";
-  }
-  for (int i = 0; i < triangles27.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles27[i].a << " " << triangles27[i].b << " " << triangles27[i].c << "\n";
-  }
-  for (int i = 0; i < triangles23.size(); i++) {
-    std::cout << "triangle " << i << ": " << triangles23[i].a << " " << triangles23[i].b << " " << triangles23[i].c << std::endl;
+  if (verbose) {
+    std::cout << "Triangles count: " << triangles51.size() << " " << triangles57.size() << " " << triangles84.size() << " " << triangles86.size() << " " << triangles58.size() << " " << triangles31.size() << " " << triangles36.size() << " " << triangles24.size() << " " << triangles27.size() << " " << triangles23.size() << "\n";
+    for (int i = 0; i < triangles51.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles51[i].a << " " << triangles51[i].b << " " << triangles51[i].c << "\n";
+    }
+    for (int i = 0; i < triangles57.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles57[i].a << " " << triangles57[i].b << " " << triangles57[i].c << "\n";
+    }
+    for (int i = 0; i < triangles84.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles84[i].a << " " << triangles84[i].b << " " << triangles84[i].c << "\n";
+    }
+    for (int i = 0; i < triangles86.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles86[i].a << " " << triangles86[i].b << " " << triangles86[i].c << "\n";
+    }
+    for (int i = 0; i < triangles58.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles58[i].a << " " << triangles58[i].b << " " << triangles58[i].c << "\n";
+    }
+    for (int i = 0; i < triangles31.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles31[i].a << " " << triangles31[i].b << " " << triangles31[i].c << "\n";
+    }
+    for (int i = 0; i < triangles36.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles36[i].a << " " << triangles36[i].b << " " << triangles36[i].c << "\n";
+    }
+    for (int i = 0; i < triangles24.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles24[i].a << " " << triangles24[i].b << " " << triangles24[i].c << "\n";
+    }
+    for (int i = 0; i < triangles27.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles27[i].a << " " << triangles27[i].b << " " << triangles27[i].c << "\n";
+    }
+    for (int i = 0; i < triangles23.size(); i++) {
+      std::cout << "triangle " << i << ": " << triangles23[i].a << " " << triangles23[i].b << " " << triangles23[i].c << std::endl;
+    }
   }
   // Calculate prisms
   std::vector<hcpwa::LineSet<8>> prisms51;
@@ -527,7 +529,7 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   //     worker.join();
   //   }
   // };
-  hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
+  hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N), static_cast<hcpwa::Float>(N)}};
   const auto aabb3d_bounds = hcpwa::AABBBounds(aabb3d);
 
   auto computend = []<int N>(
@@ -559,10 +561,12 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     }
   };
 
-  std::cout << std::format("Prism 31: {}", prisms31.size()) << std::endl;
-  std::cout << std::format("Prism 36: {}", prisms36.size()) << std::endl;
-  std::cout << std::format("Prism 24: {}", prisms24.size()) << std::endl;
-  std::cout << std::format("Prism 27: {}", prisms27.size()) << std::endl;
+  if (verbose) {
+    std::cout << std::format("Prism 31: {}", prisms31.size()) << std::endl;
+    std::cout << std::format("Prism 36: {}", prisms36.size()) << std::endl;
+    std::cout << std::format("Prism 24: {}", prisms24.size()) << std::endl;
+    std::cout << std::format("Prism 27: {}", prisms27.size()) << std::endl;
+  }
 
   std::vector<std::vector<size_t>> intersection_prism_indices_136;
   std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_136;
@@ -600,14 +604,15 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
     prisms86, 
   intersection_prism_indices_468, intersection_points_468);
 
-  std::cout << "Intersection counted:" << std::endl;
-  std::cout << "\t136 count: " << intersection_points_136.size() << std::endl;
-  std::cout << "\t247 count: " << intersection_points_247.size() << std::endl;
-  std::cout << "\t58 count: " << triangles58.size() << std::endl;
-  std::cout << "\t157 count: " << intersection_points_157.size() << std::endl;
-  std::cout << "\t468 count: " << intersection_points_468.size() << std::endl;
-  std::cout << "\t23 count: " << triangles23.size() << std::endl;
-
+  if (verbose) {
+    std::cout << "Intersection counted:" << std::endl;
+    std::cout << "\t136 count: " << intersection_points_136.size() << std::endl;
+    std::cout << "\t247 count: " << intersection_points_247.size() << std::endl;
+    std::cout << "\t58 count: " << triangles58.size() << std::endl;
+    std::cout << "\t157 count: " << intersection_points_157.size() << std::endl;
+    std::cout << "\t468 count: " << intersection_points_468.size() << std::endl;
+    std::cout << "\t23 count: " << triangles23.size() << std::endl;
+  }
 
   std::vector<std::vector<size_t>> intersection_prism_indices_phase0;
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase0;
@@ -747,26 +752,23 @@ AreasVerticesResult compute_areas_vertices(float N, float F, float v, float w,
   result.intersection_points_phase1 = intersection_points_phase1;
   result.intersection_prism_indices_phase1 = intersection_prism_indices_phase1;
 
-  // DEBUG: print result
-  // Print triangle sizes for phase 0
-  std::cout << "result.triangles31.size(): " << result.triangles31.size() << '\n';
-  std::cout << "result.triangles36.size(): " << result.triangles36.size() << '\n';
-  std::cout << "result.triangles24.size(): " << result.triangles24.size() << '\n';
-  std::cout << "result.triangles27.size(): " << result.triangles27.size() << '\n';
-  std::cout << "result.triangles58.size(): " << result.triangles58.size() << '\n';
-  // Print triangle sizes for phase 1
-  std::cout << "result.triangles51.size(): " << result.triangles51.size() << '\n';
-  std::cout << "result.triangles57.size(): " << result.triangles57.size() << '\n';
-  std::cout << "result.triangles84.size(): " << result.triangles84.size() << '\n';
-  std::cout << "result.triangles86.size(): " << result.triangles86.size() << '\n';
-  std::cout << "result.triangles23.size(): " << result.triangles23.size() << '\n';
-  // Print intersection points sizes for phase 0
-  std::cout << "result.intersection_points_phase0.size(): " << result.intersection_points_phase0.size() << '\n';
-  std::cout << "result.intersection_prism_indices_phase0.size(): " << result.intersection_prism_indices_phase0.size() << '\n';
-  // Print intersection points sizes for phase 1
-  std::cout << "result.intersection_points_phase1.size(): " << result.intersection_points_phase1.size() << '\n';
-  std::cout << "result.intersection_prism_indices_phase1.size(): " << result.intersection_prism_indices_phase1.size() << '\n';
-  
+  if (verbose) {
+    std::cout << "result.triangles31.size(): " << result.triangles31.size() << '\n';
+    std::cout << "result.triangles36.size(): " << result.triangles36.size() << '\n';
+    std::cout << "result.triangles24.size(): " << result.triangles24.size() << '\n';
+    std::cout << "result.triangles27.size(): " << result.triangles27.size() << '\n';
+    std::cout << "result.triangles58.size(): " << result.triangles58.size() << '\n';
+    std::cout << "result.triangles51.size(): " << result.triangles51.size() << '\n';
+    std::cout << "result.triangles57.size(): " << result.triangles57.size() << '\n';
+    std::cout << "result.triangles84.size(): " << result.triangles84.size() << '\n';
+    std::cout << "result.triangles86.size(): " << result.triangles86.size() << '\n';
+    std::cout << "result.triangles23.size(): " << result.triangles23.size() << '\n';
+    std::cout << "result.intersection_points_phase0.size(): " << result.intersection_points_phase0.size() << '\n';
+    std::cout << "result.intersection_prism_indices_phase0.size(): " << result.intersection_prism_indices_phase0.size() << '\n';
+    std::cout << "result.intersection_points_phase1.size(): " << result.intersection_points_phase1.size() << '\n';
+    std::cout << "result.intersection_prism_indices_phase1.size(): " << result.intersection_prism_indices_phase1.size() << '\n';
+  }
+
   return result;
 }
 

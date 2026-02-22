@@ -1,5 +1,5 @@
-#ifndef HCPWA_AFFINE_APPROXIMATOR_H
-#define HCPWA_AFFINE_APPROXIMATOR_H
+#ifndef HCPWA_GLOBAL_AFFINE_APPROXIMATOR_H
+#define HCPWA_GLOBAL_AFFINE_APPROXIMATOR_H
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -12,7 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
-namespace affine_approximator {
+namespace global_affine_approximator {
 
 // Constants
 extern const std::vector<int> kInIds;
@@ -65,7 +65,7 @@ struct SystemParams {
     double f8max;
 };
 
-class LinearApproximator {
+class GlobalAffineApproximator {
 private:
     double t_max_;
     int t_split_count_;
@@ -92,7 +92,7 @@ private:
     std::vector<std::vector<double>> row_uppers_;
 
 public:
-    LinearApproximator(double t_max,
+    GlobalAffineApproximator(double t_max,
                        int t_split_count,
                        int max_switches,
                        double tau_min,
@@ -185,6 +185,6 @@ public:
     void run();
 };
 
-}  // namespace affine_approximator
+}  // namespace global_affine_approximator
 
-#endif  // HCPWA_AFFINE_APPROXIMATOR_H
+#endif  // HCPWA_GLOBAL_AFFINE_APPROXIMATOR_H

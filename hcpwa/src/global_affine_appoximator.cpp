@@ -1,4 +1,4 @@
-#include "affine_approximator.h"
+#include "global_affine_approximator.h"
 
 #include <algo.hpp>
 #include <algorithm>
@@ -21,7 +21,7 @@
 #include <spdlog/spdlog.h>
 #include "spdlog/sinks/stdout_color_sinks.h"
 
-namespace affine_approximator {
+namespace global_affine_approximator {
 
 const std::vector<int> kInIds = {2 - 1, 3 - 1, 5 - 1, 8 - 1};
 const std::vector<int> kOutIds = {1 - 1, 4 - 1, 6 - 1, 7 - 1};
@@ -54,7 +54,7 @@ std::vector<double> getValueFunction(ValueFunction& value_function, int phase, i
     }
 }
 
-LinearApproximator::LinearApproximator(double t_max,
+GlobalAffineApproximator::GlobalAffineApproximator(double t_max,
                                        int t_split_count,
                                        int max_switches,
                                        double tau_min,
@@ -68,15 +68,15 @@ LinearApproximator::LinearApproximator(double t_max,
       system_params_(system_params) {
     if (t_split_count < 1) {
         throw std::invalid_argument(
-            "t_split_count must be at least 1 in LinearApproximator constructor.");
+            "t_split_count must be at least 1 in GlobalAffineApproximator constructor.");
     }
     if (tau_min >= tau_max || tau_min < 0.0 || tau_max < 0.0) {
         throw std::invalid_argument(
-            "tau_min must be less than tau_max and both must be >= 0 in LinearApproximator constructor.");
+            "tau_min must be less than tau_max and both must be >= 0 in GlobalAffineApproximator constructor.");
     }
     if (max_switches < 1) {
         throw std::invalid_argument(
-            "max_switches must be at least 1 in LinearApproximator constructor.");
+            "max_switches must be at least 1 in GlobalAffineApproximator constructor.");
     }
     t_range_.resize(t_split_count);
     t_delta_ = t_split_count > 1 ? std::abs(t_max / (t_split_count - 1)) : 0.0;
@@ -100,7 +100,7 @@ LinearApproximator::LinearApproximator(double t_max,
     logger_->set_level(spdlog::level::info);
 }
 
-std::tuple<double, double, double, double> LinearApproximator::getMainSystemParams() const {
+std::tuple<double, double, double, double> GlobalAffineApproximator::getMainSystemParams() const {
         return std::make_tuple(
             system_params_.N,
             system_params_.F,
@@ -109,7 +109,7 @@ std::tuple<double, double, double, double> LinearApproximator::getMainSystemPara
         );
     }
 
-double LinearApproximator::getBetaParamForAxis(int i, int j) const {
+double GlobalAffineApproximator::getBetaParamForAxis(int i, int j) const {
         if (i == 5 - 1 && j == 1 - 1) {
             return system_params_.b51;
         } else if (i == 5 - 1 && j == 7 - 1) {
@@ -134,7 +134,7 @@ double LinearApproximator::getBetaParamForAxis(int i, int j) const {
         }
     }
 
-std::pair<double, double> LinearApproximator::getFMinMaxForAxis(int i) const {
+std::pair<double, double> GlobalAffineApproximator::getFMinMaxForAxis(int i) const {
         if (i == 2 - 1) {
             return std::make_pair(system_params_.f2min, system_params_.f2max);
         } else if (i == 3 - 1) {
@@ -150,7 +150,7 @@ std::pair<double, double> LinearApproximator::getFMinMaxForAxis(int i) const {
         }
     }
 
-void LinearApproximator::getIntersectionPoints() {
+void GlobalAffineApproximator::getIntersectionPoints() {
     hcpwa::AreasVerticesResult areas_vertices = hcpwa::compute_areas_vertices(
         system_params_.N,
         system_params_.F,
@@ -195,7 +195,7 @@ void LinearApproximator::getIntersectionPoints() {
     convert_phase(areas_vertices.intersection_points_phase1, intersection_points_[1]);
 }
 
-std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> LinearApproximator::getFIJMinResolution(int i, int j, const Eigen::VectorXd& n) const {
+std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> GlobalAffineApproximator::getFIJMinResolution(int i, int j, const Eigen::VectorXd& n) const {
         // f_i_j_min_a = min{beta_i_j * F, beta_i_j * v * n_i, w(N − n_j)}
         // Where f_matr_row is row vector [length SPACE_DIM], f_vec_row is 1x1 (just value)
         const double N = system_params_.N;
@@ -231,7 +231,7 @@ std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> LinearApproximator::getFIJMinR
         return std::make_pair(f_matr_row, f_vec_row);
     }
 
-Eigen::VectorXd LinearApproximator::areaCentroidCoords(int j, int phase) const {
+Eigen::VectorXd GlobalAffineApproximator::areaCentroidCoords(int j, int phase) const {
         // Check if intersection_points are computed for given phase
         if (intersection_points_.empty() || phase < 0 || phase >= static_cast<int>(intersection_points_.size()) || intersection_points_[phase].empty()) {
             throw std::runtime_error("Intersection points are not computed for the specified phase. Please compute intersection points before calling areaCentroidCoords.");
@@ -256,7 +256,7 @@ Eigen::VectorXd LinearApproximator::areaCentroidCoords(int j, int phase) const {
         return centroid;
     }
 
-void LinearApproximator::assertShape(const Eigen::MatrixXd& matr, int expected_rows, int expected_cols) {
+void GlobalAffineApproximator::assertShape(const Eigen::MatrixXd& matr, int expected_rows, int expected_cols) {
         if (matr.rows() != expected_rows || matr.cols() != expected_cols) {
             std::ostringstream oss;
             oss << "Matrix shape must be (" << expected_rows << ", " << expected_cols 
@@ -265,7 +265,7 @@ void LinearApproximator::assertShape(const Eigen::MatrixXd& matr, int expected_r
         }
     }
 
-void LinearApproximator::assertShape(const Eigen::VectorXd& vec, int expected_size) {
+void GlobalAffineApproximator::assertShape(const Eigen::VectorXd& vec, int expected_size) {
         if (vec.size() != expected_size) {
             std::ostringstream oss;
             oss << "Vector size must be " << expected_size << ". Got: " << vec.size();
@@ -273,7 +273,7 @@ void LinearApproximator::assertShape(const Eigen::VectorXd& vec, int expected_si
         }
     }
 
-void LinearApproximator::assertScalar(double value) {
+void GlobalAffineApproximator::assertScalar(double value) {
         // In C++, double is always scalar, but we can check for NaN/Inf
         if (std::isnan(value) || std::isinf(value)) {
             std::ostringstream oss;
@@ -283,7 +283,7 @@ void LinearApproximator::assertScalar(double value) {
     }
 
 std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-LinearApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
+GlobalAffineApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
         Eigen::VectorXd n = areaCentroidCoords(j, phase);
         
         Eigen::MatrixXd a_matr;
@@ -372,7 +372,7 @@ LinearApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
         return std::make_tuple(a_matr, b_vec, g_vec, g_scal);
     }
 
-std::pair<Eigen::RowVectorXd, double> LinearApproximator::getMaxEstimForOutIds(
+std::pair<Eigen::RowVectorXd, double> GlobalAffineApproximator::getMaxEstimForOutIds(
     int i, double n_i, bool v_sign) const {
         const double F = system_params_.F;
         const double v = system_params_.v;
@@ -395,7 +395,7 @@ std::pair<Eigen::RowVectorXd, double> LinearApproximator::getMaxEstimForOutIds(
         return std::make_pair(q_mat_row, q_vec_row);
     }
 
-std::pair<Eigen::RowVectorXd, double> LinearApproximator::getMaxEstimForInIds(
+std::pair<Eigen::RowVectorXd, double> GlobalAffineApproximator::getMaxEstimForInIds(
     int i, double n_i, bool v_sign) const {
         Eigen::RowVectorXd q_mat_row = Eigen::RowVectorXd::Zero(kSpaceDim);
         double q_vec_row = 0.0;
@@ -425,7 +425,7 @@ std::pair<Eigen::RowVectorXd, double> LinearApproximator::getMaxEstimForInIds(
         return std::make_pair(q_mat_row, q_vec_row);
     }
 
-std::pair<Eigen::MatrixXd, Eigen::VectorXd> LinearApproximator::getQQForArea(
+std::pair<Eigen::MatrixXd, Eigen::VectorXd> GlobalAffineApproximator::getQQForArea(
     int j, int phase) const {
         // Get representative point in Ω(j)
         Eigen::VectorXd n0 = areaCentroidCoords(j, phase);
@@ -464,7 +464,7 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> LinearApproximator::getQQForArea(
     }
 
 std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-LinearApproximator::getBMatAndBVecJ(int j, int phase) const {
+GlobalAffineApproximator::getBMatAndBVecJ(int j, int phase) const {
         // Get A, f, g, g_scal for area j and phase
         auto [A_j_matr, f_j_vec, g_j_vec, g_j_scal] = getAMatrFVecGVecAndGScalJ(j, phase);
         
@@ -518,7 +518,7 @@ LinearApproximator::getBMatAndBVecJ(int j, int phase) const {
     }
 
 std::tuple<std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>, std::vector<Eigen::VectorXd>, std::vector<double>>
-LinearApproximator::precomputeBMatAndBVec(int phase) {
+GlobalAffineApproximator::precomputeBMatAndBVec(int phase) {
         auto intersection_points_phase = intersection_points_[phase];
         int n_areas = intersection_points_phase.size();
         std::vector<Eigen::MatrixXd> B_j_matrs_lst;
@@ -542,7 +542,7 @@ LinearApproximator::precomputeBMatAndBVec(int phase) {
     }
 
 std::pair<std::vector<Eigen::VectorXd>, std::vector<double>>
-LinearApproximator::getCVecDScalLists(int phase,
+GlobalAffineApproximator::getCVecDScalLists(int phase,
                                       const Eigen::VectorXd& x_prev_vec,
                                       const std::vector<Eigen::VectorXd>& g_j_vecs,
                                       const std::vector<double>& g_j_scals) const {
@@ -592,7 +592,7 @@ Solves the following LP:
  *     max_{n in Omega^(j)} [x^T * B^(j) * n + x^T * b^(j) + c^(j)^T * n + d^(j)] <= 0,  for all j = 1...M
  *     z <= min_{n in Omega^(j)} [x^T * B^(j) * n + x^T * b^(j) + c^(j)^T * n + d^(j)],  for all j = 1...M
 
-@param self: pointer to LinearApproximator object
+@param self: pointer to GlobalAffineApproximator object
 @param phase: phase index
 @return: tuple of vectors:
     - starts: list of indices where each constraint starts
@@ -602,7 +602,7 @@ Solves the following LP:
     - c_vec: list of coefficients for the objective function
 */
 std::tuple<std::vector<int>, std::vector<int>, std::vector<double>, std::vector<double>, Eigen::RowVectorXd>
-LinearApproximator::prepareLpMatrices(int phase) {
+GlobalAffineApproximator::prepareLpMatrices(int phase) {
         const std::vector<Eigen::MatrixXd>& b_j_matrs = this->b_j_matrs_[phase];
         const std::vector<Eigen::VectorXd>& b_j_vecs = this->b_j_vecs_[phase];
         const std::vector<Eigen::VectorXd>& g_j_vecs = this->g_j_vecs_[phase];
@@ -670,7 +670,7 @@ LinearApproximator::prepareLpMatrices(int phase) {
         return std::make_tuple(std::move(starts), std::move(col_index), std::move(value), std::move(row_upper), std::move(c_vec));
     }
 
-double LinearApproximator::getBorderFuncValuesAtN(int r, int theta_idx, int theta_end_idx, int phase, const Eigen::VectorXd& n) {
+double GlobalAffineApproximator::getBorderFuncValuesAtN(int r, int theta_idx, int theta_end_idx, int phase, const Eigen::VectorXd& n) {
         try {
             std::vector<double> x = getValueFunction(this->value_function_, phase, r, theta_idx, theta_end_idx);
             // x is [V^+, V^-, v^+, v^-] of size 2 * (kSpaceDim + 1)
@@ -689,7 +689,7 @@ double LinearApproximator::getBorderFuncValuesAtN(int r, int theta_idx, int thet
         }
     }
 
-double LinearApproximator::getMaxBorderFuncValuesAtN(int theta_idx,
+double GlobalAffineApproximator::getMaxBorderFuncValuesAtN(int theta_idx,
                                                     const std::vector<int>& theta_end_ids,
                                                     int max_switches,
                                                     int phase,
@@ -704,7 +704,7 @@ double LinearApproximator::getMaxBorderFuncValuesAtN(int theta_idx,
         return max_val;
     }
 
-std::vector<double> LinearApproximator::getBorderConditions(int switch_phase, int theta_idx, double theta, int switch_cnt) {
+std::vector<double> GlobalAffineApproximator::getBorderConditions(int switch_phase, int theta_idx, double theta, int switch_cnt) {
         // If switch_cnt == 0, return zeros
         if (switch_cnt == 0) {
             return std::vector<double>(2 * (kSpaceDim + 1), 0.0);
@@ -849,7 +849,7 @@ std::vector<double> LinearApproximator::getBorderConditions(int switch_phase, in
     }
 
 std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
-LinearApproximator::initializeHighs(int phase) {
+GlobalAffineApproximator::initializeHighs(int phase) {
         auto [starts, col_index, value, row_upper, c_vec] = prepareLpMatrices(phase);
         const int m = row_upper.size();
         const int n = c_vec.size();
@@ -904,7 +904,7 @@ LinearApproximator::initializeHighs(int phase) {
         return std::make_tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>(std::move(highs), std::move(row_lower), std::move(row_upper));
     }
 
-void LinearApproximator::updateHighsRhsUpperBounds(int phase, const std::vector<double>& v_prev_vec) {
+void GlobalAffineApproximator::updateHighsRhsUpperBounds(int phase, const std::vector<double>& v_prev_vec) {
         if (v_prev_vec.size() != kVDeltaDim) {
             throw std::invalid_argument("v_prev_vec size must be " + std::to_string(kVDeltaDim));
         }
@@ -942,7 +942,7 @@ void LinearApproximator::updateHighsRhsUpperBounds(int phase, const std::vector<
         }
     }
 
-std::vector<double> LinearApproximator::solveLp(int phase) {
+std::vector<double> GlobalAffineApproximator::solveLp(int phase) {
         auto& highs_solver = highs_solvers_[phase];
         
         // Run the solver
@@ -973,7 +973,7 @@ std::vector<double> LinearApproximator::solveLp(int phase) {
         return v_next;
     }
 
-void LinearApproximator::precomputeMatrices() {
+void GlobalAffineApproximator::precomputeMatrices() {
         logger_->info("Starting precomputeMatrices");
         if (intersection_points_.empty()) {
             throw std::runtime_error(
@@ -993,7 +993,7 @@ void LinearApproximator::precomputeMatrices() {
         logger_->info("Finished precomputeMatrices");
     }
 
-void LinearApproximator::run() {
+void GlobalAffineApproximator::run() {
         logger_->info("Starting affine approximator");
         getIntersectionPoints();
         precomputeMatrices();
@@ -1091,4 +1091,4 @@ void LinearApproximator::run() {
             }
         }
     }
-}  // namespace affine_approximator
+}  // namespace global_affine_approximator

@@ -58,6 +58,7 @@ FetchContent_MakeAvailable(eigen)
 # target_include_directories(project_eigen INTERFACE ${eigen_SOURCE_DIR})
 
 # spdlog
+set(SPDLOG_USE_STD_FORMAT on)
 FetchContent_Declare(
   spdlog
   GIT_REPOSITORY https://github.com/gabime/spdlog.git

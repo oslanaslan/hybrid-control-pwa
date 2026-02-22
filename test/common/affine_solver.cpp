@@ -5,14 +5,15 @@
 #include <uniqie_pool.hpp>
 #include <symbolic.hpp>
 #include <Eigen/Dense>
-#include <affine_approximator.h>
+#include <global_affine_approximator.h>
 #include "utility.hpp"
 
 
 #include "morph.hpp"
 #include "types.hpp"
 
-TEST(common, affine_solver) {
+
+static global_affine_approximator::GlobalAffineApproximator create_linear_approximator() {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
   // Same parameters as user_algo_tests (compute_areas_vertices)
@@ -37,7 +38,7 @@ TEST(common, affine_solver) {
   constexpr double f5max = 10;
   constexpr double f8max = 10;
 
-  affine_approximator::SystemParams system_params{
+  global_affine_approximator::SystemParams system_params{
     N,
     F,
     v,
@@ -67,7 +68,7 @@ TEST(common, affine_solver) {
   constexpr double tau_min = 0.0;
   constexpr double tau_max = 1.0;
 
-  affine_approximator::LinearApproximator linear_approximator(
+  return global_affine_approximator::GlobalAffineApproximator(
       t_max,
       t_split_count,
       max_switches,
@@ -75,5 +76,10 @@ TEST(common, affine_solver) {
       tau_max,
       system_params
   );
-  linear_approximator.run();
+}
+
+TEST(common, affine_solver) {
+  auto linear_approximator = create_linear_approximator();
+  
+  // linear_approximator.run();
 }

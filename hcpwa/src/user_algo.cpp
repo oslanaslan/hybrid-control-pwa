@@ -110,144 +110,144 @@ AreasVerticesResult compute_areas_vertices(double N, double F, double v, double 
     auto resolutions = MinResolutions(f51);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines51.append_range(lines);
+    lines51.insert(lines51.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f57);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines57.append_range(lines);
+    lines57.insert(lines57.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f84);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines84.append_range(lines);
+    lines84.insert(lines84.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f86);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines86.append_range(lines);
+    lines86.insert(lines86.end(), lines.begin(), lines.end());
   }
   {
       auto resolutions = MinResolutions(f31);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
       auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-      lines31.append_range(lines);
+      lines31.insert(lines31.end(), lines.begin(), lines.end());
   }
   {
       auto resolutions = MinResolutions(f36);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
       auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-      lines36.append_range(lines);
+      lines36.insert(lines36.end(), lines.begin(), lines.end());
   }
   {
       auto resolutions = MinResolutions(f24);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
       auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-      lines24.append_range(lines);
+      lines24.insert(lines24.end(), lines.begin(), lines.end());
   }
   {
       auto resolutions = MinResolutions(f27);
       constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
       auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-      lines27.append_range(lines);
+      lines27.insert(lines27.end(), lines.begin(), lines.end());
   }
   // In planes lower bounds
   {
     auto resolutions = MinResolutions(f2in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines24.append_range(lines);
-    lines27.append_range(lines);
-    lines23.append_range(lines);
+    lines24.insert(lines24.end(), lines.begin(), lines.end());
+    lines27.insert(lines27.end(), lines.begin(), lines.end());
+    lines23.insert(lines23.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f3in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines31.append_range(lines);
-    lines36.append_range(lines);
-    lines23.append_range(lines);
+    lines31.insert(lines31.end(), lines.begin(), lines.end());
+    lines36.insert(lines36.end(), lines.begin(), lines.end());
+    lines23.insert(lines23.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f5in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines51.append_range(lines);
-    lines57.append_range(lines);
-    lines58.append_range(lines);
+    lines51.insert(lines51.end(), lines.begin(), lines.end());
+    lines57.insert(lines57.end(), lines.begin(), lines.end());
+    lines58.insert(lines58.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f8in_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines84.append_range(lines);
-    lines86.append_range(lines);
-    lines58.append_range(lines);
+    lines84.insert(lines84.end(), lines.begin(), lines.end());
+    lines86.insert(lines86.end(), lines.begin(), lines.end());
+    lines58.insert(lines58.end(), lines.begin(), lines.end());
   }
   // In planes upper bounds
   {
     auto resolutions = MinResolutions(f2in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines24.append_range(lines);
-    lines27.append_range(lines);
-    lines23.append_range(lines);
+    lines24.insert(lines24.end(), lines.begin(), lines.end());
+    lines27.insert(lines27.end(), lines.begin(), lines.end());
+    lines23.insert(lines23.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f3in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines31.append_range(lines);
-    lines36.append_range(lines);
-    lines23.append_range(lines);
+    lines31.insert(lines31.end(), lines.begin(), lines.end());
+    lines36.insert(lines36.end(), lines.begin(), lines.end());
+    lines23.insert(lines23.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f5in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines51.append_range(lines);
-    lines57.append_range(lines);
-    lines58.append_range(lines);
+    lines51.insert(lines51.end(), lines.begin(), lines.end());
+    lines57.insert(lines57.end(), lines.begin(), lines.end());
+    lines58.insert(lines58.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f8in_upper);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines84.append_range(lines);
-    lines86.append_range(lines);
-    lines58.append_range(lines);
+    lines84.insert(lines84.end(), lines.begin(), lines.end());
+    lines86.insert(lines86.end(), lines.begin(), lines.end());
+    lines58.insert(lines58.end(), lines.begin(), lines.end());
   }
   // Out planes
   {
     auto resolutions = MinResolutions(f1out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines51.append_range(lines);
-    lines31.append_range(lines);
+    lines51.insert(lines51.end(), lines.begin(), lines.end());
+    lines31.insert(lines31.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f4out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines84.append_range(lines);
-    lines24.append_range(lines);
+    lines84.insert(lines84.end(), lines.begin(), lines.end());
+    lines24.insert(lines24.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f6out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines36.append_range(lines);
-    lines86.append_range(lines);
+    lines36.insert(lines36.end(), lines.begin(), lines.end());
+    lines86.insert(lines86.end(), lines.begin(), lines.end());
   }
   {
     auto resolutions = MinResolutions(f7out_lower);
     constexpr int kDim = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
     auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim, 8>(resolutions);
-    lines27.append_range(lines);
-    lines57.append_range(lines);
+    lines27.insert(lines27.end(), lines.begin(), lines.end());
+    lines57.insert(lines57.end(), lines.begin(), lines.end());
   }
 
   if (verbose) {
@@ -628,8 +628,10 @@ AreasVerticesResult compute_areas_vertices(double N, double F, double v, double 
 
         intersection_points_phase0.emplace_back();
         intersection_prism_indices_phase0.emplace_back();
-        intersection_prism_indices_phase0.back().append_range(intersection_prism_indices_136[i136]);
-        intersection_prism_indices_phase0.back().append_range(intersection_prism_indices_247[i247]);
+        const auto& indices_136 = intersection_prism_indices_136[i136];
+        const auto& indices_247 = intersection_prism_indices_247[i247];
+        intersection_prism_indices_phase0.back().insert(intersection_prism_indices_phase0.back().end(), indices_136.begin(), indices_136.end());
+        intersection_prism_indices_phase0.back().insert(intersection_prism_indices_phase0.back().end(), indices_247.begin(), indices_247.end());
         intersection_prism_indices_phase0.back().push_back(i58);
 
         for (size_t j136 = 0; j136 < intersection_prism_indices_136[i136].size(); j136++) {
@@ -664,8 +666,10 @@ AreasVerticesResult compute_areas_vertices(double N, double F, double v, double 
 
         intersection_points_phase1.emplace_back();
         intersection_prism_indices_phase1.emplace_back();
-        intersection_prism_indices_phase1.back().append_range(intersection_prism_indices_157[i157]);
-        intersection_prism_indices_phase1.back().append_range(intersection_prism_indices_468[i468]);
+        const auto& indices_157 = intersection_prism_indices_157[i157];
+        const auto& indices_468 = intersection_prism_indices_468[i468];
+        intersection_prism_indices_phase1.back().insert(intersection_prism_indices_phase1.back().end(), indices_157.begin(), indices_157.end());
+        intersection_prism_indices_phase1.back().insert(intersection_prism_indices_phase1.back().end(), indices_468.begin(), indices_468.end());
         intersection_prism_indices_phase1.back().push_back(i23);
 
         for (size_t j157 = 0; j157 < intersection_prism_indices_157[i157].size(); j157++) {

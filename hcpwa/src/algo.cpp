@@ -173,10 +173,11 @@ std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(co
   for (std::size_t i = 0; i < triangles.size(); i++) {
     result.push_back(hcpwa::TriangleWithUniqueVertices{
       triangles[i].first,
-      .a_index = pool.Index(triangles[i].first.a),
-      .b_index = pool.Index(triangles[i].first.b),
-      .c_index = pool.Index(triangles[i].first.c),
-      .polygon_index = triangles[i].second});
+      pool.Index(triangles[i].first.a),
+      pool.Index(triangles[i].first.b),
+      pool.Index(triangles[i].first.c),
+      triangles[i].second
+    });
   }
   return result;
 }

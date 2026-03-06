@@ -183,21 +183,21 @@ TEST(complex, intersect) {
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines51.append_range(lines);
+        lines51.insert(lines51.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f1out);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines51.append_range(lines);
+        lines51.insert(lines51.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f5in);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines51.append_range(lines);
+        lines51.insert(lines51.end(), lines.begin(), lines.end());
     }
     // Plane (5, 7)
     hcpwa::LineSet<8> lines57;
@@ -206,21 +206,21 @@ TEST(complex, intersect) {
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines57.append_range(lines);
+        lines57.insert(lines57.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f5in);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines57.append_range(lines);
+        lines57.insert(lines57.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f7out);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines57.append_range(lines);
+        lines57.insert(lines57.end(), lines.begin(), lines.end());
     }
     // Plane (8, 4)
     hcpwa::LineSet<8> lines84;
@@ -229,21 +229,21 @@ TEST(complex, intersect) {
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines84.append_range(lines);
+        lines84.insert(lines84.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f4out);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines84.append_range(lines);
+        lines84.insert(lines84.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f8in);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines84.append_range(lines);
+        lines84.insert(lines84.end(), lines.begin(), lines.end());
     }
     // Plane (8, 6)
     hcpwa::LineSet<8> lines86;
@@ -252,21 +252,21 @@ TEST(complex, intersect) {
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines86.append_range(lines);
+        lines86.insert(lines86.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f6out);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines86.append_range(lines);
+        lines86.insert(lines86.end(), lines.begin(), lines.end());
     }
     {
         auto resolutions = MinResolutions(f8in);
         constexpr int kDim
             = hcpwa::VectorSize<decltype(resolutions.front().second)>() - 1;
         auto [lines, masks] = hcpwa::ResolutionsToMasks<kDim>(resolutions);
-        lines86.append_range(lines);
+        lines86.insert(lines86.end(), lines.begin(), lines.end());
     }
 
     auto polygon51 = hcpwa::SplitAABBWithLines(
@@ -371,10 +371,10 @@ TEST(complex, intersect) {
             for (auto& prism84 : prisms84) {
                 for (auto& prism86 : prisms86) {
                     hcpwa::LineSet<8> concatenated_prisms;
-                    concatenated_prisms.append_range(prism51);
-                    concatenated_prisms.append_range(prism57);
-                    concatenated_prisms.append_range(prism84);
-                    concatenated_prisms.append_range(prism86);
+                    concatenated_prisms.insert(concatenated_prisms.end(), prism51.begin(), prism51.end());
+                    concatenated_prisms.insert(concatenated_prisms.end(), prism57.begin(), prism57.end());
+                    concatenated_prisms.insert(concatenated_prisms.end(), prism84.begin(), prism84.end());
+                    concatenated_prisms.insert(concatenated_prisms.end(), prism86.begin(), prism86.end());
                     auto intersection
                         = hcpwa::LinesToPoints(concatenated_prisms);
                     if (intersection.size() > 0) {

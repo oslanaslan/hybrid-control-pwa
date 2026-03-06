@@ -13,6 +13,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include "util/assert_utils.hpp"
+#include "util/value_function_utils.hpp"
+
 namespace piecewise_affine_approximator {
 
 // Constants
@@ -23,24 +26,27 @@ constexpr int kSpaceDim = 8;
 constexpr int kSubsystemCount = 5;
 constexpr double kEps = 1e-6;
 
-// ValueFunction[phase][r][theta_idx][theta_end_idx][SPACE_DIM] = x_prev[i], where i = 0, ..., SPACE_DIM - 1
-using ValueFunction = std::unordered_map<int,
-    std::unordered_map<int,
-        std::unordered_map<int, std::unordered_map<int, std::vector<double>>>>>;
+using ValueFunction = hcpwa::util::ValueFunction;
 
-void setValueFunction(ValueFunction& value_function,
-                      int phase,
-                      int r,
-                      int theta_idx,
-                      int theta_end_idx,
-                      const std::vector<double>& x_prev,
-                      std::size_t expected_size);
+inline void setValueFunction(ValueFunction& value_function,
+                             int phase,
+                             int r,
+                             int theta_idx,
+                             int theta_end_idx,
+                             const std::vector<double>& x_prev,
+                             std::size_t expected_size) {
+    hcpwa::util::setValueFunction(value_function, phase, r, theta_idx,
+                                  theta_end_idx, x_prev, expected_size);
+}
 
-std::vector<double> getValueFunction(ValueFunction& value_function,
-                                     int phase,
-                                     int r,
-                                     int theta_idx,
-                                     int theta_end_idx);
+inline std::vector<double> getValueFunction(ValueFunction& value_function,
+                                            int phase,
+                                            int r,
+                                            int theta_idx,
+                                            int theta_end_idx) {
+    return hcpwa::util::getValueFunction(value_function, phase, r, theta_idx,
+                                         theta_end_idx);
+}
 
 struct VarLayout {
     std::array<int, kSubsystemCount> M_s{};
@@ -138,13 +144,6 @@ public:
         int i, int j, const Eigen::VectorXd& n) const;
 
     Eigen::VectorXd areaCentroidCoords(int j, int phase) const;
-
-    static void assertShape(const Eigen::MatrixXd& matr,
-                            int expected_rows,
-                            int expected_cols);
-    static void assertShape(const Eigen::VectorXd& vec, int expected_size);
-
-    static void assertScalar(double value);
 
     std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
     getAMatrFVecGVecAndGScalJ(int j, int phase) const;

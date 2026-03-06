@@ -1,5 +1,7 @@
 #include "piecewise_affine_approximator.h"
 
+#include "util/assert_utils.hpp"
+
 #include <algo.hpp>
 #include <algorithm>
 #include <cstddef>
@@ -27,42 +29,8 @@ const std::vector<int> kInIds = {2 - 1, 3 - 1, 5 - 1, 8 - 1};
 const std::vector<int> kOutIds = {1 - 1, 4 - 1, 6 - 1, 7 - 1};
 const int kPhases = 2;
 
-void setValueFunction(ValueFunction& value_function,
-                      int phase,
-                      int r,
-                      int theta_idx,
-                      int theta_end_idx,
-                      const std::vector<double>& x_prev,
-                      std::size_t expected_size) {
-    if (x_prev.size() != expected_size) {
-        throw std::invalid_argument("x_prev size must be " + std::to_string(expected_size));
-    }
-    auto& target = value_function[phase][r][theta_idx][theta_end_idx];
-    if (!target.empty()) {
-        throw std::runtime_error("setValueFunction: location already used for phase=" + std::to_string(phase) +
-                                 " r=" + std::to_string(r) +
-                                 " theta_idx=" + std::to_string(theta_idx) +
-                                 " theta_end_idx=" + std::to_string(theta_end_idx));
-    }
-    target = x_prev;
-}
-
-std::vector<double> getValueFunction(ValueFunction& value_function,
-                                     int phase,
-                                     int r,
-                                     int theta_idx,
-                                     int theta_end_idx) {
-    try {
-        return value_function[phase][r][theta_idx][theta_end_idx];
-    } catch (const std::out_of_range&) {
-        throw std::invalid_argument("getValueFunction: location not found for phase=" + std::to_string(phase) +
-                                    " r=" + std::to_string(r) +
-                                    " theta_idx=" + std::to_string(theta_idx) +
-                                    " theta_end_idx=" + std::to_string(theta_end_idx));
-    }
-}
-
-VarLayout::VarLayout(const std::array<int, kSubsystemCount>& Ms) : M_s(Ms) {
+VarLayout::VarLayout(const std::array<int, kSubsystemCount>& Ms)
+    : M_s(Ms) {
     for (int s = 0; s < kSubsystemCount; ++s) {
         if (M_s[s] < 0) {
             throw std::invalid_argument("VarLayout: M_s must be non-negative");
@@ -77,10 +45,12 @@ int VarLayout::idxV(int s, int k, int i) const {
         throw std::invalid_argument("VarLayout::idxV: invalid subsystem id");
     }
     if (k < 0 || k >= M_s[s]) {
-        throw std::invalid_argument("VarLayout::idxV: invalid simplex id for subsystem");
+        throw std::invalid_argument(
+            "VarLayout::idxV: invalid simplex id for subsystem");
     }
     if (i < 0 || i >= kSpaceDim) {
-        throw std::invalid_argument("VarLayout::idxV: invalid vector component id");
+        throw std::invalid_argument(
+            "VarLayout::idxV: invalid vector component id");
     }
     int offset = 0;
     for (int ss = 0; ss < s; ++ss) {
@@ -89,12 +59,9 @@ int VarLayout::idxV(int s, int k, int i) const {
     return offset + k * kSpaceDim + i;
 }
 
-PiecewiseAffineApproximator::PiecewiseAffineApproximator(double t_max,
-                                                         int t_split_count,
-                                                         int max_switches,
-                                                         double tau_min,
-                                                         double tau_max,
-                                                         const SystemParams& system_params)
+PiecewiseAffineApproximator::PiecewiseAffineApproximator(
+    double t_max, int t_split_count, int max_switches, double tau_min,
+    double tau_max, const SystemParams& system_params)
     : t_max_(t_max),
       t_split_count_(t_split_count),
       max_switches_(max_switches),
@@ -103,15 +70,18 @@ PiecewiseAffineApproximator::PiecewiseAffineApproximator(double t_max,
       system_params_(system_params) {
     if (t_split_count < 1) {
         throw std::invalid_argument(
-            "t_split_count must be at least 1 in PiecewiseAffineApproximator constructor.");
+            "t_split_count must be at least 1 in PiecewiseAffineApproximator "
+            "constructor.");
     }
     if (tau_min >= tau_max || tau_min < 0.0 || tau_max < 0.0) {
         throw std::invalid_argument(
-            "tau_min must be less than tau_max and both must be >= 0 in PiecewiseAffineApproximator constructor.");
+            "tau_min must be less than tau_max and both must be >= 0 in "
+            "PiecewiseAffineApproximator constructor.");
     }
     if (max_switches < 1) {
         throw std::invalid_argument(
-            "max_switches must be at least 1 in PiecewiseAffineApproximator constructor.");
+            "max_switches must be at least 1 in PiecewiseAffineApproximator "
+            "constructor.");
     }
     t_range_.resize(t_split_count);
     t_delta_ = t_split_count > 1 ? std::abs(t_max / (t_split_count - 1)) : 0.0;
@@ -135,8 +105,10 @@ PiecewiseAffineApproximator::PiecewiseAffineApproximator(double t_max,
     logger_->set_level(spdlog::level::info);
 }
 
-std::tuple<double, double, double, double> PiecewiseAffineApproximator::getMainSystemParams() const {
-    return std::make_tuple(system_params_.N, system_params_.F, system_params_.v, system_params_.w);
+std::tuple<double, double, double, double>
+PiecewiseAffineApproximator::getMainSystemParams() const {
+    return std::make_tuple(system_params_.N, system_params_.F, system_params_.v,
+                           system_params_.w);
 }
 
 double PiecewiseAffineApproximator::getBetaParamForAxis(int i, int j) const {
@@ -164,10 +136,12 @@ double PiecewiseAffineApproximator::getBetaParamForAxis(int i, int j) const {
     if (i == 2 - 1 && j == 7 - 1) {
         return system_params_.b27;
     }
-    throw std::invalid_argument(std::format("No such beta params for axis ({}, {})", i, j));
+    throw std::invalid_argument(
+        std::format("No such beta params for axis ({}, {})", i, j));
 }
 
-std::pair<double, double> PiecewiseAffineApproximator::getFMinMaxForAxis(int i) const {
+std::pair<double, double> PiecewiseAffineApproximator::getFMinMaxForAxis(
+    int i) const {
     if (i == 2 - 1) {
         return std::make_pair(system_params_.f2min, system_params_.f2max);
     }
@@ -180,30 +154,18 @@ std::pair<double, double> PiecewiseAffineApproximator::getFMinMaxForAxis(int i) 
     if (i == 8 - 1) {
         return std::make_pair(system_params_.f8min, system_params_.f8max);
     }
-    throw std::invalid_argument("No such f min max for axis " + std::to_string(i));
+    throw std::invalid_argument("No such f min max for axis "
+                                + std::to_string(i));
 }
 
 void PiecewiseAffineApproximator::getIntersectionPoints() {
     hcpwa::AreasVerticesResult areas_vertices = hcpwa::compute_areas_vertices(
-        system_params_.N,
-        system_params_.F,
-        system_params_.v,
-        system_params_.w,
-        system_params_.b51,
-        system_params_.b57,
-        system_params_.b84,
-        system_params_.b86,
-        system_params_.b31,
-        system_params_.b36,
-        system_params_.b24,
-        system_params_.b27,
-        system_params_.f2min,
-        system_params_.f3min,
-        system_params_.f5min,
-        system_params_.f8min,
-        system_params_.f2max,
-        system_params_.f3max,
-        system_params_.f5max,
+        system_params_.N, system_params_.F, system_params_.v, system_params_.w,
+        system_params_.b51, system_params_.b57, system_params_.b84,
+        system_params_.b86, system_params_.b31, system_params_.b36,
+        system_params_.b24, system_params_.b27, system_params_.f2min,
+        system_params_.f3min, system_params_.f5min, system_params_.f8min,
+        system_params_.f2max, system_params_.f3max, system_params_.f5max,
         system_params_.f8max);
 
     intersection_points_.resize(kPhases);
@@ -228,15 +190,18 @@ void PiecewiseAffineApproximator::getIntersectionPoints() {
         }
     };
 
-    convert_phase(areas_vertices.intersection_points_phase0, intersection_points_[0]);
-    convert_phase(areas_vertices.intersection_points_phase1, intersection_points_[1]);
+    convert_phase(areas_vertices.intersection_points_phase0,
+                  intersection_points_[0]);
+    convert_phase(areas_vertices.intersection_points_phase1,
+                  intersection_points_[1]);
 
     prism_indices_[0] = areas_vertices.intersection_prism_indices_phase0;
     prism_indices_[1] = areas_vertices.intersection_prism_indices_phase1;
     for (int phase = 0; phase < kPhases; ++phase) {
         for (const auto& region_idx : prism_indices_[phase]) {
             if (region_idx.size() != kSubsystemCount) {
-                throw std::runtime_error("Expected 5 simplex indices per region");
+                throw std::runtime_error(
+                    "Expected 5 simplex indices per region");
             }
         }
     }
@@ -260,10 +225,9 @@ void PiecewiseAffineApproximator::getIntersectionPoints() {
     });
 }
 
-std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> PiecewiseAffineApproximator::getFIJMinResolution(
-    int i,
-    int j,
-    const Eigen::VectorXd& n) const {
+std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd>
+PiecewiseAffineApproximator::getFIJMinResolution(
+    int i, int j, const Eigen::VectorXd& n) const {
     const double N = system_params_.N;
     const double F = system_params_.F;
     const double v = system_params_.v;
@@ -286,20 +250,24 @@ std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> PiecewiseAffineApproximator::g
     } else if (a < b + kEps && a < c + kEps) {
         f_matr_row(i) = beta_i_j * v;
     } else {
-        throw std::invalid_argument(std::format("No such case: a={}, b={}, c={} (getFIJMinResolution)", a, b, c));
+        throw std::invalid_argument(std::format(
+            "No such case: a={}, b={}, c={} (getFIJMinResolution)", a, b, c));
     }
     return std::make_pair(f_matr_row, f_vec_row);
 }
 
-Eigen::VectorXd PiecewiseAffineApproximator::areaCentroidCoords(int j, int phase) const {
+Eigen::VectorXd PiecewiseAffineApproximator::areaCentroidCoords(
+    int j, int phase) const {
     if (intersection_points_.empty() || phase < 0
         || phase >= static_cast<int>(intersection_points_.size())
         || intersection_points_[phase].empty()) {
-        throw std::runtime_error("Intersection points are not computed for the specified phase");
+        throw std::runtime_error(
+            "Intersection points are not computed for the specified phase");
     }
     const auto& intersection_points_per_phase = intersection_points_[phase];
     if (j < 0 || j >= static_cast<int>(intersection_points_per_phase.size())) {
-        throw std::invalid_argument("Invalid area index j in areaCentroidCoords");
+        throw std::invalid_argument(
+            "Invalid area index j in areaCentroidCoords");
     }
     const auto& area = intersection_points_per_phase[j];
     if (area.empty()) {
@@ -311,31 +279,8 @@ Eigen::VectorXd PiecewiseAffineApproximator::areaCentroidCoords(int j, int phase
         centroid += point;
     }
     centroid /= static_cast<double>(area.size());
-    assertShape(centroid, kSpaceDim);
+    hcpwa::util::assertShape(centroid, kSpaceDim);
     return centroid;
-}
-
-void PiecewiseAffineApproximator::assertShape(const Eigen::MatrixXd& matr, int expected_rows, int expected_cols) {
-    if (matr.rows() != expected_rows || matr.cols() != expected_cols) {
-        throw std::runtime_error(std::format("Matrix shape must be ({}, {}). Got: ({}, {})",
-                                             expected_rows,
-                                             expected_cols,
-                                             matr.rows(),
-                                             matr.cols()));
-    }
-}
-
-void PiecewiseAffineApproximator::assertShape(const Eigen::VectorXd& vec, int expected_size) {
-    if (vec.size() != expected_size) {
-        throw std::runtime_error(
-            std::format("Vector size must be {}. Got: {}", expected_size, vec.size()));
-    }
-}
-
-void PiecewiseAffineApproximator::assertScalar(double value) {
-    if (std::isnan(value) || std::isinf(value)) {
-        throw std::runtime_error(std::format("Value must be a finite scalar. Got: {}", value));
-    }
 }
 
 std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
@@ -373,8 +318,10 @@ PiecewiseAffineApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
         b_vec(6) = f27_vec_row(0);
         b_vec(7) = 0.0;
 
-        g_vec = (f31_matr_row + f36_matr_row + f24_matr_row + f27_matr_row).transpose();
-        g_scal = f31_vec_row(0) + f36_vec_row(0) + f24_vec_row(0) + f27_vec_row(0);
+        g_vec = (f31_matr_row + f36_matr_row + f24_matr_row + f27_matr_row)
+                    .transpose();
+        g_scal
+            = f31_vec_row(0) + f36_vec_row(0) + f24_vec_row(0) + f27_vec_row(0);
     } else if (phase == 1) {
         auto [f51_matr_row, f51_vec_row] = getFIJMinResolution(5 - 1, 1 - 1, n);
         auto [f57_matr_row, f57_vec_row] = getFIJMinResolution(5 - 1, 7 - 1, n);
@@ -401,25 +348,24 @@ PiecewiseAffineApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
         b_vec(6) = f57_vec_row(0);
         b_vec(7) = -f84_vec_row(0) - f86_vec_row(0);
 
-        g_vec = (f51_matr_row + f57_matr_row + f84_matr_row + f86_matr_row).transpose();
-        g_scal = f51_vec_row(0) + f57_vec_row(0) + f84_vec_row(0) + f86_vec_row(0);
+        g_vec = (f51_matr_row + f57_matr_row + f84_matr_row + f86_matr_row)
+                    .transpose();
+        g_scal
+            = f51_vec_row(0) + f57_vec_row(0) + f84_vec_row(0) + f86_vec_row(0);
     } else {
         throw std::invalid_argument(std::format("No such phase: {}", phase));
     }
 
-    assertShape(b_vec, kSpaceDim);
-    assertShape(a_matr, kSpaceDim, kSpaceDim);
-    assertShape(g_vec, kSpaceDim);
-    assertScalar(g_scal);
+    hcpwa::util::assertShape(b_vec, kSpaceDim);
+    hcpwa::util::assertShape(a_matr, kSpaceDim, kSpaceDim);
+    hcpwa::util::assertShape(g_vec, kSpaceDim);
+    hcpwa::util::assertScalar(g_scal);
 
     return std::make_tuple(a_matr, b_vec, g_vec, g_scal);
 }
 
-std::tuple<std::vector<int>,
-           std::vector<int>,
-           std::vector<double>,
-           std::vector<double>,
-           Eigen::RowVectorXd>
+std::tuple<std::vector<int>, std::vector<int>, std::vector<double>,
+           std::vector<double>, Eigen::RowVectorXd>
 PiecewiseAffineApproximator::prepareLpMatrices(int phase) {
     const auto& layout = layouts_.at(phase);
     const auto& intersection_points_phase = intersection_points_.at(phase);
@@ -431,7 +377,8 @@ PiecewiseAffineApproximator::prepareLpMatrices(int phase) {
     const auto& g_j_scals = g_j_scals_.at(phase);
 
     if (intersection_points_phase.size() != prism_indices_phase.size()) {
-        throw std::runtime_error("prepareLpMatrices: inconsistent geometry and prism index counts");
+        throw std::runtime_error(
+            "prepareLpMatrices: inconsistent geometry and prism index counts");
     }
 
     std::vector<int> starts;
@@ -452,14 +399,17 @@ PiecewiseAffineApproximator::prepareLpMatrices(int phase) {
         const double g_scal = g_j_scals[j];
         const auto& j_s_size_t = prism_indices_phase[j];
         if (j_s_size_t.size() != kSubsystemCount) {
-            throw std::runtime_error("prepareLpMatrices: each region must have 5 simplex indices");
+            throw std::runtime_error(
+                "prepareLpMatrices: each region must have 5 simplex indices");
         }
 
         std::array<int, kSubsystemCount> j_s{};
         for (int s = 0; s < kSubsystemCount; ++s) {
             j_s[s] = static_cast<int>(j_s_size_t[s]);
             if (j_s[s] < 0 || j_s[s] >= layout.M_s[s]) {
-                throw std::runtime_error("prepareLpMatrices: simplex index out of range for subsystem");
+                throw std::runtime_error(
+                    "prepareLpMatrices: simplex index out of range for "
+                    "subsystem");
             }
         }
 
@@ -467,8 +417,10 @@ PiecewiseAffineApproximator::prepareLpMatrices(int phase) {
             Eigen::VectorXd z = Aj * nu + fj;
             const double g_nu = gj.dot(nu) + g_scal;
 
-            std::array<Eigen::Matrix<double, kSpaceDim, 1>, kSubsystemCount> q_arr{};
-            std::array<Eigen::Matrix<double, kSpaceDim, 1>, kSubsystemCount> r_arr{};
+            std::array<Eigen::Matrix<double, kSpaceDim, 1>, kSubsystemCount>
+                q_arr{};
+            std::array<Eigen::Matrix<double, kSpaceDim, 1>, kSubsystemCount>
+                r_arr{};
             for (int s = 0; s < kSubsystemCount; ++s) {
                 q_arr[s].setZero();
                 r_arr[s].setZero();
@@ -524,20 +476,21 @@ PiecewiseAffineApproximator::prepareLpMatrices(int phase) {
     }
     starts.push_back(static_cast<int>(nnz));
     b0_uppers_[phase] = b0_upper;
-    return std::make_tuple(
-        std::move(starts), std::move(col_index), std::move(value), std::move(row_upper), std::move(c_vec));
+    return std::make_tuple(std::move(starts), std::move(col_index),
+                           std::move(value), std::move(row_upper),
+                           std::move(c_vec));
 }
 
-double PiecewiseAffineApproximator::getBorderFuncValuesAtN(int r,
-                                                           int theta_idx,
-                                                           int theta_end_idx,
-                                                           int phase,
-                                                           const Eigen::VectorXd& n) {
+double PiecewiseAffineApproximator::getBorderFuncValuesAtN(
+    int r, int theta_idx, int theta_end_idx, int phase,
+    const Eigen::VectorXd& n) {
     try {
-        const auto x = getValueFunction(value_function_, phase, r, theta_idx, theta_end_idx);
+        const auto x = getValueFunction(value_function_, phase, r, theta_idx,
+                                        theta_end_idx);
         const auto& layout = layouts_.at(phase);
         if (x.size() != static_cast<std::size_t>(layout.numV)) {
-            throw std::invalid_argument("ValueFunction vector has invalid size");
+            throw std::invalid_argument(
+                "ValueFunction vector has invalid size");
         }
         const auto& prism_indices_phase = prism_indices_.at(phase);
         const auto& subsystem_axes = subsystem_axes_.at(phase);
@@ -562,25 +515,22 @@ double PiecewiseAffineApproximator::getBorderFuncValuesAtN(int r,
     }
 }
 
-double PiecewiseAffineApproximator::getMaxBorderFuncValuesAtN(int theta_idx,
-                                                              const std::vector<int>& theta_end_ids,
-                                                              int max_switches,
-                                                              int phase,
-                                                              const Eigen::VectorXd& n) {
+double PiecewiseAffineApproximator::getMaxBorderFuncValuesAtN(
+    int theta_idx, const std::vector<int>& theta_end_ids, int max_switches,
+    int phase, const Eigen::VectorXd& n) {
     double max_val = -std::numeric_limits<double>::infinity();
     for (int theta_end_idx : theta_end_ids) {
         for (int r = 0; r < max_switches; ++r) {
-            const double val = getBorderFuncValuesAtN(r, theta_idx, theta_end_idx, phase, n);
+            const double val
+                = getBorderFuncValuesAtN(r, theta_idx, theta_end_idx, phase, n);
             max_val = std::max(max_val, val);
         }
     }
     return max_val;
 }
 
-std::vector<double> PiecewiseAffineApproximator::getBorderConditions(int switch_phase,
-                                                                     int theta_idx,
-                                                                     double theta,
-                                                                     int switch_cnt) {
+std::vector<double> PiecewiseAffineApproximator::getBorderConditions(
+    int switch_phase, int theta_idx, double theta, int switch_cnt) {
     const auto& layout = layouts_.at(switch_phase);
     if (switch_cnt == 0) {
         return std::vector<double>(layout.numV, 0.0);
@@ -654,42 +604,34 @@ std::vector<double> PiecewiseAffineApproximator::getBorderConditions(int switch_
     std::vector<double> col_upper(n, border);
     std::vector<double> row_lower(m, -inf);
 
-    HighsStatus st = highs.addCols(
-        n,
-        c_vec.data(),
-        col_lower.data(),
-        col_upper.data(),
-        0,
-        nullptr,
-        nullptr,
-        nullptr);
+    HighsStatus st
+        = highs.addCols(n, c_vec.data(), col_lower.data(), col_upper.data(), 0,
+                        nullptr, nullptr, nullptr);
     if (st != HighsStatus::kOk) {
         throw std::runtime_error("getBorderConditions: highs.addCols failed");
     }
 
-    st = highs.addRows(
-        m,
-        row_lower.data(),
-        row_upper.data(),
-        static_cast<int>(value.size()),
-        starts.data(),
-        col_index.data(),
-        value.data());
+    st = highs.addRows(m, row_lower.data(), row_upper.data(),
+                       static_cast<int>(value.size()), starts.data(),
+                       col_index.data(), value.data());
     if (st != HighsStatus::kOk) {
         throw std::runtime_error("getBorderConditions: highs.addRows failed");
     }
 
     st = highs.run();
-    if (st != HighsStatus::kOk || highs.getModelStatus() != HighsModelStatus::kOptimal) {
+    if (st != HighsStatus::kOk
+        || highs.getModelStatus() != HighsModelStatus::kOptimal) {
         throw std::runtime_error("getBorderConditions: LP solution not found");
     }
     const auto& solution = highs.getSolution();
-    return std::vector<double>(solution.col_value.begin(), solution.col_value.end());
+    return std::vector<double>(solution.col_value.begin(),
+                               solution.col_value.end());
 }
 
 std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
 PiecewiseAffineApproximator::initializeHighs(int phase) {
-    auto [starts, col_index, value, row_upper, c_vec] = prepareLpMatrices(phase);
+    auto [starts, col_index, value, row_upper, c_vec]
+        = prepareLpMatrices(phase);
     const int m = static_cast<int>(row_upper.size());
     const int n = static_cast<int>(c_vec.size());
     const auto& layout = layouts_.at(phase);
@@ -705,45 +647,39 @@ PiecewiseAffineApproximator::initializeHighs(int phase) {
     col_lower[layout.idxS()] = 0.0;
     std::vector<double> row_lower(m, -inf);
 
-    HighsStatus st = highs->addCols(
-        n,
-        c_vec.data(),
-        col_lower.data(),
-        col_upper.data(),
-        0,
-        nullptr,
-        nullptr,
-        nullptr);
+    HighsStatus st
+        = highs->addCols(n, c_vec.data(), col_lower.data(), col_upper.data(), 0,
+                         nullptr, nullptr, nullptr);
     if (st != HighsStatus::kOk) {
         throw std::runtime_error("initializeHighs: highs.addCols failed.");
     }
 
-    st = highs->addRows(
-        m,
-        row_lower.data(),
-        row_upper.data(),
-        static_cast<int>(value.size()),
-        starts.data(),
-        col_index.data(),
-        value.data());
+    st = highs->addRows(m, row_lower.data(), row_upper.data(),
+                        static_cast<int>(value.size()), starts.data(),
+                        col_index.data(), value.data());
     if (st != HighsStatus::kOk) {
         throw std::runtime_error("initializeHighs: highs.addRows failed.");
     }
 
-    return std::make_tuple(std::move(highs), std::move(row_lower), std::move(row_upper));
+    return std::make_tuple(std::move(highs), std::move(row_lower),
+                           std::move(row_upper));
 }
 
-void PiecewiseAffineApproximator::updateHighsRhsUpperBounds(int phase, const std::vector<double>& v_prev_vec) {
+void PiecewiseAffineApproximator::updateHighsRhsUpperBounds(
+    int phase, const std::vector<double>& v_prev_vec) {
     const auto& layout = layouts_.at(phase);
     if (v_prev_vec.size() != static_cast<std::size_t>(layout.numV)) {
-        throw std::invalid_argument("v_prev_vec size must be " + std::to_string(layout.numV));
+        throw std::invalid_argument("v_prev_vec size must be "
+                                    + std::to_string(layout.numV));
     }
     const auto& row_lower = row_lowers_.at(phase);
     const auto& b0_upper = b0_uppers_.at(phase);
     const auto& terms = beta_terms_.at(phase);
     auto& highs_solver = highs_solvers_.at(phase);
-    if (row_lower.size() != b0_upper.size() || row_lower.size() != terms.size()) {
-        throw std::runtime_error("updateHighsRhsUpperBounds: invalid precomputed RHS buffers");
+    if (row_lower.size() != b0_upper.size()
+        || row_lower.size() != terms.size()) {
+        throw std::runtime_error(
+            "updateHighsRhsUpperBounds: invalid precomputed RHS buffers");
     }
 
     std::vector<double> new_row_upper = b0_upper;
@@ -752,7 +688,8 @@ void PiecewiseAffineApproximator::updateHighsRhsUpperBounds(int phase, const std
         for (int s = 0; s < kSubsystemCount; ++s) {
             const int k = term.j_s[s];
             for (int i = 0; i < kSpaceDim; ++i) {
-                beta += v_prev_vec[layout.idxV(s, k, i)] * term.q[s](i) / t_delta_;
+                beta += v_prev_vec[layout.idxV(s, k, i)] * term.q[s](i)
+                        / t_delta_;
             }
         }
         new_row_upper[term.row] += term.sign * beta;
@@ -760,10 +697,12 @@ void PiecewiseAffineApproximator::updateHighsRhsUpperBounds(int phase, const std
 
     std::vector<int> row_ids(new_row_upper.size());
     std::iota(row_ids.begin(), row_ids.end(), 0);
-    auto st = highs_solver->changeRowsBounds(
-        static_cast<int>(row_ids.size()), row_ids.data(), row_lower.data(), new_row_upper.data());
+    auto st = highs_solver->changeRowsBounds(static_cast<int>(row_ids.size()),
+                                             row_ids.data(), row_lower.data(),
+                                             new_row_upper.data());
     if (st != HighsStatus::kOk) {
-        throw std::runtime_error("updateHighsRhsUpperBounds: highs.changeRowsBounds failed.");
+        throw std::runtime_error(
+            "updateHighsRhsUpperBounds: highs.changeRowsBounds failed.");
     }
 }
 
@@ -773,16 +712,19 @@ std::vector<double> PiecewiseAffineApproximator::solveLp(int phase) {
     HighsStatus run_status = highs_solver->run();
     if (run_status != HighsStatus::kOk) {
         throw std::runtime_error(
-            "solveLp: highs_solver.run() failed with status " + std::to_string(static_cast<int>(run_status)));
+            "solveLp: highs_solver.run() failed with status "
+            + std::to_string(static_cast<int>(run_status)));
     }
     if (highs_solver->getModelStatus() != HighsModelStatus::kOptimal) {
-        throw std::runtime_error("solveLp: LP solution not found for phase " + std::to_string(phase) +
-                                 ", model status: "
-                                 + std::to_string(static_cast<int>(highs_solver->getModelStatus())));
+        throw std::runtime_error(
+            "solveLp: LP solution not found for phase " + std::to_string(phase)
+            + ", model status: "
+            + std::to_string(static_cast<int>(highs_solver->getModelStatus())));
     }
 
     const auto& solution = highs_solver->getSolution();
-    std::vector<double> result(solution.col_value.begin(), solution.col_value.end());
+    std::vector<double> result(solution.col_value.begin(),
+                               solution.col_value.end());
     std::vector<double> v_next(layout.numV);
     std::copy(result.begin(), result.begin() + layout.numV, v_next.begin());
     return v_next;
@@ -790,8 +732,10 @@ std::vector<double> PiecewiseAffineApproximator::solveLp(int phase) {
 
 void PiecewiseAffineApproximator::precomputeMatrices() {
     logger_->info("Starting precomputeMatrices");
-    if (intersection_points_.empty() || prism_indices_.empty() || layouts_.size() != kPhases) {
-        throw std::runtime_error("precomputeMatrices: intersection points are not initialized");
+    if (intersection_points_.empty() || prism_indices_.empty()
+        || layouts_.size() != kPhases) {
+        throw std::runtime_error(
+            "precomputeMatrices: intersection points are not initialized");
     }
     a_j_matrs_.assign(kPhases, {});
     f_j_vecs_.assign(kPhases, {});
@@ -801,13 +745,15 @@ void PiecewiseAffineApproximator::precomputeMatrices() {
     b0_uppers_.assign(kPhases, {});
 
     for (int phase = 0; phase < kPhases; ++phase) {
-        const int n_areas = static_cast<int>(intersection_points_[phase].size());
+        const int n_areas
+            = static_cast<int>(intersection_points_[phase].size());
         a_j_matrs_[phase].reserve(n_areas);
         f_j_vecs_[phase].reserve(n_areas);
         g_j_vecs_[phase].reserve(n_areas);
         g_j_scals_[phase].reserve(n_areas);
         for (int j = 0; j < n_areas; ++j) {
-            auto [A_j, f_j, g_j_vec, g_j_scal] = getAMatrFVecGVecAndGScalJ(j, phase);
+            auto [A_j, f_j, g_j_vec, g_j_scal]
+                = getAMatrFVecGVecAndGScalJ(j, phase);
             a_j_matrs_[phase].emplace_back(std::move(A_j));
             f_j_vecs_[phase].emplace_back(std::move(f_j));
             g_j_vecs_[phase].emplace_back(std::move(g_j_vec));
@@ -840,7 +786,8 @@ void PiecewiseAffineApproximator::run() {
 
     const double half_step = this->t_delta_ / 2;
     for (int switch_cnt = 0; switch_cnt <= max_switches_; ++switch_cnt) {
-        logger_->info("Computing value function for switch count {}", switch_cnt);
+        logger_->info("Computing value function for switch count {}",
+                      switch_cnt);
         for (int phase = 0; phase < kPhases; ++phase) {
             logger_->info("Computing value function for phase {}", phase);
             const auto& layout = layouts_[phase];
@@ -851,15 +798,18 @@ void PiecewiseAffineApproximator::run() {
                 t_min = std::max(0.0, this->t_max_ - this->tau_max_);
                 t_max = this->t_max_;
             } else {
-                t_min = std::max(0.0, this->t_max_ - switch_cnt * this->tau_max_);
+                t_min
+                    = std::max(0.0, this->t_max_ - switch_cnt * this->tau_max_);
                 t_max = this->t_max_ - switch_cnt * this->tau_min_;
             }
 
             const double theta_min = t_min;
-            const double theta_max = std::min(t_max + this->tau_max_, this->t_max_);
+            const double theta_max
+                = std::min(t_max + this->tau_max_, this->t_max_);
             std::vector<int> theta_range_ids;
             for (std::size_t i = 0; i < this->t_range_.size(); ++i) {
-                if (this->t_range_[i] >= (theta_min - half_step) && this->t_range_[i] <= (theta_max + half_step)) {
+                if (this->t_range_[i] >= (theta_min - half_step)
+                    && this->t_range_[i] <= (theta_max + half_step)) {
                     theta_range_ids.push_back(this->t_index_[i]);
                 }
             }
@@ -870,41 +820,55 @@ void PiecewiseAffineApproximator::run() {
             }
 
             const auto n = static_cast<std::ptrdiff_t>(theta_range.size());
-            for (std::ptrdiff_t itheta_idx = n - 1; itheta_idx >= 0; --itheta_idx) {
+            for (std::ptrdiff_t itheta_idx = n - 1; itheta_idx >= 0;
+                 --itheta_idx) {
                 const int theta_idx = theta_range_ids[itheta_idx];
                 const double theta = theta_range[itheta_idx];
                 logger_->info("Computing value function for theta {}", theta);
-                const double t_theta_min = std::max(theta - this->tau_max_, t_min);
+                const double t_theta_min
+                    = std::max(theta - this->tau_max_, t_min);
 
                 std::vector<int> t_theta_range_ids;
                 for (std::size_t i = 0; i < this->t_range_.size(); ++i) {
-                    if (this->t_range_[i] >= (t_theta_min - half_step) && this->t_range_[i] < (theta - half_step)) {
+                    if (this->t_range_[i] >= (t_theta_min - half_step)
+                        && this->t_range_[i] < (theta - half_step)) {
                         t_theta_range_ids.push_back(this->t_index_[i]);
                     }
                 }
 
                 const int switch_phase = phase == 0 ? 1 : 0;
-                std::vector<double> v_prev = getBorderConditions(switch_phase, theta_idx, theta, switch_cnt);
+                std::vector<double> v_prev = getBorderConditions(
+                    switch_phase, theta_idx, theta, switch_cnt);
                 if (v_prev.size() != static_cast<std::size_t>(layout.numV)) {
-                    throw std::invalid_argument("v_prev size must be " + std::to_string(layout.numV));
+                    throw std::invalid_argument("v_prev size must be "
+                                                + std::to_string(layout.numV));
                 }
-                setValueFunction(value_function_, phase, switch_cnt, theta_idx, theta_idx, v_prev, layout.numV);
+                setValueFunction(value_function_, phase, switch_cnt, theta_idx,
+                                 theta_idx, v_prev, layout.numV);
                 updateHighsRhsUpperBounds(phase, v_prev);
 
                 if (t_theta_range_ids.empty()) {
                     throw std::runtime_error(
-                        "t_theta_range_ids is empty: No previous timesteps to compute value function for.");
+                        "t_theta_range_ids is empty: No previous timesteps to "
+                        "compute "
+                        "value function for.");
                 }
 
-                const auto n_t = static_cast<std::ptrdiff_t>(t_theta_range_ids.size());
-                for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0; --i_t_idx) {
+                const auto n_t
+                    = static_cast<std::ptrdiff_t>(t_theta_range_ids.size());
+                for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0;
+                     --i_t_idx) {
                     const int t_idx = t_theta_range_ids[i_t_idx];
                     logger_->info("Computing value function for t {}", t_idx);
                     std::vector<double> v_next = solveLp(phase);
-                    if (v_next.size() != static_cast<std::size_t>(layout.numV)) {
-                        throw std::invalid_argument("v_next size must be " + std::to_string(layout.numV));
+                    if (v_next.size()
+                        != static_cast<std::size_t>(layout.numV)) {
+                        throw std::invalid_argument(
+                            "v_next size must be "
+                            + std::to_string(layout.numV));
                     }
-                    setValueFunction(value_function_, phase, switch_cnt, t_idx, theta_idx, v_next, layout.numV);
+                    setValueFunction(value_function_, phase, switch_cnt, t_idx,
+                                     theta_idx, v_next, layout.numV);
                     updateHighsRhsUpperBounds(phase, v_next);
                     v_prev = v_next;
                 }

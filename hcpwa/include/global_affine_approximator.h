@@ -4,6 +4,7 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <Highs.h>
+#include <cstddef>
 #include <memory>
 #include <tuple>
 #include <unordered_map>
@@ -12,6 +13,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include "util/assert_utils.hpp"
+#include "util/value_function_utils.hpp"
+
 namespace global_affine_approximator {
 
 // Constants
@@ -19,27 +23,25 @@ extern const std::vector<int> kInIds;
 extern const std::vector<int> kOutIds;
 extern const int kPhases;
 constexpr int kSpaceDim = 8;
-constexpr int kVDeltaDim = 2 * kSpaceDim + 2; // V^+, V^-, v^+, v^-
-constexpr int kLPCols = kVDeltaDim + 2 ; // V^+, V^-, v^+, v^-, z^+, z^-
+constexpr int kVDeltaDim = kSpaceDim + 1;            // [V, v]
+constexpr int kLPCols = kVDeltaDim + 1 + kSpaceDim;  // [V, v, z, s]
 constexpr double kEps = 1e-6;
 
-// ValueFunction[phase][r][theta_idx][theta_end_idx][SPACE_DIM] = x_prev[i], where i = 0, ..., SPACE_DIM - 1
-using ValueFunction = std::unordered_map<int,
-    std::unordered_map<int,
-        std::unordered_map<int, std::unordered_map<int, std::vector<double>>>>>;
+using ValueFunction = hcpwa::util::ValueFunction;
 
-void setValueFunction(ValueFunction& value_function,
-                      int phase,
-                      int r,
-                      int theta_idx,
-                      int theta_end_idx,
-                      const std::vector<double>& x_prev);
+inline void setValueFunction(ValueFunction& value_function, int phase, int r,
+                             int theta_idx, int theta_end_idx,
+                             const std::vector<double>& x_prev) {
+    hcpwa::util::setValueFunction(value_function, phase, r, theta_idx,
+                                  theta_end_idx, x_prev, kVDeltaDim);
+}
 
-std::vector<double> getValueFunction(ValueFunction& value_function,
-                                     int phase,
-                                     int r,
-                                     int theta_idx,
-                                     int theta_end_idx);
+inline std::vector<double> getValueFunction(ValueFunction& value_function,
+                                            int phase, int r, int theta_idx,
+                                            int theta_end_idx) {
+    return hcpwa::util::getValueFunction(value_function, phase, r, theta_idx,
+                                         theta_end_idx);
+}
 
 struct SystemParams {
     double N;
@@ -66,7 +68,7 @@ struct SystemParams {
 };
 
 class GlobalAffineApproximator {
-private:
+   private:
     double t_max_;
     int t_split_count_;
     int max_switches_;
@@ -81,25 +83,26 @@ private:
     std::vector<Eigen::VectorXd> cube_angle_vertices_;
     std::vector<std::vector<std::vector<Eigen::VectorXd>>> intersection_points_;
 
-    std::vector<std::vector<Eigen::MatrixXd>> b_j_matrs_;
-    std::vector<std::vector<Eigen::VectorXd>> b_j_vecs_;
+    std::vector<std::vector<Eigen::MatrixXd>> A_j_matrs_;
+    std::vector<std::vector<Eigen::VectorXd>> f_j_vecs_;
+    std::vector<std::vector<Eigen::MatrixXd>> Q_c_j_matrs_;
+    std::vector<std::vector<Eigen::VectorXd>> q_c_j_vecs_;
+    std::vector<std::vector<Eigen::MatrixXd>> Q_r_j_matrs_;
+    std::vector<std::vector<Eigen::VectorXd>> q_r_j_vecs_;
     std::vector<std::vector<Eigen::VectorXd>> g_j_vecs_;
     std::vector<std::vector<double>> g_j_scals_;
+    std::vector<std::vector<Eigen::MatrixXd>> b_j_matrs_;
+    std::vector<std::vector<Eigen::VectorXd>> b_j_vecs_;
 
     std::shared_ptr<spdlog::logger> logger_;
     std::vector<std::unique_ptr<Highs>> highs_solvers_;
     std::vector<std::vector<double>> row_lowers_;
     std::vector<std::vector<double>> row_uppers_;
 
-public:
-    GlobalAffineApproximator(double t_max,
-                       int t_split_count,
-                       int max_switches,
-                       double tau_min,
-                       double tau_max,
-                       const SystemParams& system_params);
-
-    std::tuple<double, double, double, double> getMainSystemParams() const;
+   public:
+    GlobalAffineApproximator(double t_max, int t_split_count, int max_switches,
+                             double tau_min, double tau_max,
+                             const SystemParams& system_params);
 
     double getBetaParamForAxis(int i, int j) const;
 
@@ -112,67 +115,35 @@ public:
 
     Eigen::VectorXd areaCentroidCoords(int j, int phase) const;
 
-    static void assertShape(const Eigen::MatrixXd& matr,
-                            int expected_rows,
-                            int expected_cols);
-    static void assertShape(const Eigen::VectorXd& vec, int expected_size);
-
-    static void assertScalar(double value);
-
     std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
     getAMatrFVecGVecAndGScalJ(int j, int phase) const;
 
-    std::pair<Eigen::RowVectorXd, double> getMaxEstimForOutIds(
-        int i, double n_i, bool v_sign) const;
+    std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd,
+               Eigen::VectorXd>
+    getQQForArea(int j, int phase) const;
 
-    std::pair<Eigen::RowVectorXd, double> getMaxEstimForInIds(
-        int i, double n_i, bool v_sign) const;
+    std::tuple<std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
+               std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
+               std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
+               std::vector<Eigen::VectorXd>, std::vector<double>>
+    precomputeSystemMatrices(int phase);
 
-    std::pair<Eigen::MatrixXd, Eigen::VectorXd> getQQForArea(int j,
-                                                             int phase) const;
-
-    std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-    getBMatAndBVecJ(int j, int phase) const;
-
-    std::tuple<std::vector<Eigen::MatrixXd>,
-               std::vector<Eigen::VectorXd>,
-               std::vector<Eigen::VectorXd>,
-               std::vector<double>>
-    precomputeBMatAndBVec(int phase);
-
-    std::pair<std::vector<Eigen::VectorXd>, std::vector<double>>
-    getCVecDScalLists(int phase,
-                      const Eigen::VectorXd& x_prev_vec,
-                      const std::vector<Eigen::VectorXd>& g_j_vecs,
-                      const std::vector<double>& g_j_scals) const;
-
-    std::tuple<std::vector<int>,
-               std::vector<int>,
-               std::vector<double>,
-               std::vector<double>,
-               Eigen::RowVectorXd>
+    std::tuple<std::vector<int>, std::vector<int>, std::vector<double>,
+               std::vector<double>, Eigen::RowVectorXd>
     prepareLpMatrices(int phase);
 
-    double getBorderFuncValuesAtN(int r,
-                                  int theta_idx,
-                                  int theta_end_idx,
-                                  int phase,
-                                  const Eigen::VectorXd& n);
+    double getBorderFuncValuesAtN(int r, int theta_idx, int theta_end_idx,
+                                  int phase, const Eigen::VectorXd& n);
 
     double getMaxBorderFuncValuesAtN(int theta_idx,
                                      const std::vector<int>& theta_end_ids,
-                                     int max_switches,
-                                     int phase,
+                                     int max_switches, int phase,
                                      const Eigen::VectorXd& n);
 
-    std::vector<double> getBorderConditions(int switch_phase,
-                                           int theta_idx,
-                                           double theta,
-                                           int switch_cnt);
+    std::vector<double> getBorderConditions(int switch_phase, int theta_idx,
+                                            double theta, int switch_cnt);
 
-    std::tuple<std::unique_ptr<Highs>,
-               std::vector<double>,
-               std::vector<double>>
+    std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
     initializeHighs(int phase);
 
     void updateHighsRhsUpperBounds(int phase,
@@ -183,6 +154,15 @@ public:
     void precomputeMatrices();
 
     void run();
+
+    void buildLPSegmentForJ(
+        const Eigen::MatrixXd& Aj, const Eigen::VectorXd& fj,
+        const Eigen::MatrixXd& Qc, const Eigen::VectorXd& qc,
+        const Eigen::MatrixXd& Qr, const Eigen::VectorXd& qr,
+        const Eigen::VectorXd& g_n, double g0,
+        const std::vector<Eigen::VectorXd>& vertices_j, double dt,
+        std::vector<int>& starts, std::vector<int>& cols,
+        std::vector<double>& values, std::vector<double>& b_fixed);
 };
 
 }  // namespace global_affine_approximator

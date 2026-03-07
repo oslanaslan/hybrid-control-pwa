@@ -539,7 +539,11 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
 
         // RHS split
         // seg.b_fix(row_min) = kappa_fix;
-        b_fixed.push_back(kappa_fix);
+        if (std::abs(kappa_fix) > kEps) {
+            b_fixed.push_back(kappa_fix);
+        } else {
+            b_fixed.push_back(0);
+        }
         // seg.b_t(row_min)   =  kappa_t;
         hcpwa::util::csrAppendRow(starts, cols, values, lower_bound_dense_row,
                                   kEps);
@@ -555,7 +559,11 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
             = (dt * r.transpose());
 
         // seg.b_fix(row_max) = -kappa_fix;
-        b_fixed.push_back(-kappa_fix);
+        if (std::abs(kappa_fix) > kEps) {
+            b_fixed.push_back(-kappa_fix);
+        } else {
+            b_fixed.push_back(0);
+        }
         // seg.b_t(row_max)   = -kappa_t;
         hcpwa::util::csrAppendRow(starts, cols, values, upper_bound_dense_row,
                                   kEps);
@@ -791,7 +799,7 @@ GlobalAffineApproximator::initializeHighs(int phase) {
     std::unique_ptr<Highs> highs = std::make_unique<Highs>();
 
     // ---- Solver options (set once) ----
-        highs->setOptionValue("solver", "simplex");
+    highs->setOptionValue("solver", "pdlp");
     // Depending on HiGHS version, some options may not exist; handle failures
     // if needed.
     highs->setOptionValue("presolve", "on");

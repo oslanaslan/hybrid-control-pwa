@@ -579,7 +579,7 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
     const std::vector<Eigen::VectorXd>& b_j_vecs = this->b_j_vecs_[phase];
     const auto& intersection_points_phase = intersection_points_[phase];
     int n_areas = intersection_points_phase.size();
-    std::vector<int> starts;
+    std::vector<int> starts = {0};
     std::vector<int> col_index;
     std::vector<double> value;
     std::vector<double> row_upper;
@@ -604,6 +604,9 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
         row(i) = -1;
         row(i + kSpaceDim + 2) = -1;
         hcpwa::util::csrAppendRow(starts, col_index, value, row);
+    }
+    for (int i = 0; i < 2 * kSpaceDim; i++) {
+        row_upper.push_back(0);
     }
 
     // z -> max, [V, v, z, s]
@@ -788,7 +791,7 @@ GlobalAffineApproximator::initializeHighs(int phase) {
     std::unique_ptr<Highs> highs = std::make_unique<Highs>();
 
     // ---- Solver options (set once) ----
-    highs->setOptionValue("solver", "simplex");
+        highs->setOptionValue("solver", "simplex");
     // Depending on HiGHS version, some options may not exist; handle failures
     // if needed.
     highs->setOptionValue("presolve", "on");

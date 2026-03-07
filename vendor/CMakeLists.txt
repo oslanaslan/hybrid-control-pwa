@@ -66,5 +66,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
+# google or-tools
+# include(FetchContent)
+# FetchContent_Declare(
+#   ortools
+#   GIT_REPOSITORY https://github.com/google/or-tools.git
+#   GIT_TAG        stable # or a specific version like v9.8
+# )
+# FetchContent_MakeAvailable(ortools)
+
 # add_library(spdlog INTERFACE)
 # target_include_directories(spdlog INTERFACE ${spdlog_SOURCE_DIR}/include)

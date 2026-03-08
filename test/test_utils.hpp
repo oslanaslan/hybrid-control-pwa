@@ -33,7 +33,8 @@ using VecValueType = decltype([]<typename F, int N>(linalg::Vector<F, N>) -> F {
 template <int N>
 constexpr std::ostream& operator<<(std::ostream& os,
                                    const PrettyPrint<hcpwa::Vec<N>>& pp) {
-  using ValueType = VecValueType<hcpwa::Vec<N>>;
+  // using ValueType = VecValueType<hcpwa::Vec<N>>;
+  using ValueType = hcpwa::Vec<N>::ValueType;
   constexpr std::size_t kCount = sizeof(hcpwa::Vec<N>) / sizeof(ValueType);
   os << "Vec<" << N << ">{";
   for (std::size_t i = 0; i < kCount - 1; i++) {

@@ -591,6 +591,7 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
     std::vector<int> col_index;
     std::vector<double> value;
     std::vector<double> row_upper;
+    // n_areas = 1000000;
 
     for (int j = 0; j < n_areas; ++j) {
         buildLPSegmentForJ(a_j_matrs[j], f_j_vecs[j], q_c_j_matrs[j],
@@ -660,7 +661,7 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
     int switch_phase, int theta_idx, double theta, int switch_cnt) {
     // If switch_cnt == 0, return zeros
     if (switch_cnt == 0) {
-        return std::vector<double>(2 * (kSpaceDim + 1), 0.0);
+        return std::vector<double>(kVDeltaDim, 0.0);
     }
 
     // Calculate theta_min and theta_max
@@ -798,19 +799,30 @@ GlobalAffineApproximator::initializeHighs(int phase) {
 
     std::unique_ptr<Highs> highs = std::make_unique<Highs>();
 
-    // ---- Solver options (set once) ----
+    // highs->setOptionValue("solver", "pdlp");
     highs->setOptionValue("solver", "pdlp");
-    // Depending on HiGHS version, some options may not exist; handle failures
-    // if needed.
     highs->setOptionValue("presolve", "on");
+    // Simplex conf
+    highs->setOptionValue("simplex_strategy", 0);
+    // PDLP conf
+    highs->setOptionValue("pdlp_optimality_tolerance", 1e-10);
+    // Common tolerance
+    highs->setOptionValue("kkt_tolerance", 1e-5);
+    highs->setOptionValue("primal_feasibility_tolerance", 1e-5);
+    highs->setOptionValue("dual_feasibility_tolerance", 1e-5);
+    highs->setOptionValue("primal_residual_tolerance", 1e-5);
+    highs->setOptionValue("dual_residual_tolerance", 1e-5);
+    highs->setOptionValue("optimality_tolerance", 1e-5);
+    highs->setOptionValue("small_matrix_value", 1e-5);
+    // Logging and etc
+    highs->setOptionValue("log_to_console", true);
+
     highs->changeObjectiveSense(
         ObjSense::kMaximize);  // Must be maximization because need to maximize
                                // the lower bound of the non-positive value (z)
                                // for Chebyshev approximation.
 
     const double inf = highs->getInfinity();
-
-    // ---- Add columns (variables) ----
     std::vector<double> col_lower(n, -inf);
     std::vector<double> col_upper(n, inf);
     std::vector<double> row_lower(m, -inf);
@@ -1012,7 +1024,7 @@ void GlobalAffineApproximator::run() {
                  --itheta_idx) {
                 int theta_idx = theta_range_ids[itheta_idx];
                 double theta = theta_range[itheta_idx];
-                logger_->info("Computing value function for theta {}", theta);
+                logger_->info("Computing value function for theta_idx {}", theta_idx);
                 double t_theta_min = max(theta - this->tau_max_, t_min);
 
                 // Replace NumPy-style boolean indexing with C++ loop
@@ -1053,7 +1065,7 @@ void GlobalAffineApproximator::run() {
                 for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0;
                      --i_t_idx) {
                     int t_idx = t_theta_range_ids[i_t_idx];
-                    logger_->info("Computing value function for t {}", t_idx);
+                    logger_->info("Computing value function for t_idx {}", t_idx);
                     std::vector<double> v_next = solveLp(phase);
                     // v_next = [V, v]
                     if (v_next.size() != kVDeltaDim) {

@@ -13,12 +13,12 @@ BreakInheritanceList: AfterComma
 BreakBeforeBinaryOperators: true
 
 # Change indentation from 2 to 4 spaces
-IndentWidth: 4
-TabWidth: 4
-UseTab: Never
+# IndentWidth: 4
+# TabWidth: 4
+# UseTab: Never
 
 # Ensure variable names are not restricted (clang-format does not 
 # strictly enforce naming conventions like 'camelCase' vs 'PascalCase' 
 # by default; it only formats them. These settings ensure no 
 # unusual alignment interferes with your naming style.)
-AlignConsecutiveDeclarations: false
+# AlignConsecutiveDeclarations: false

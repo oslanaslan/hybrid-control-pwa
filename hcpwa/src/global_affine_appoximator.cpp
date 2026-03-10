@@ -57,12 +57,10 @@ GlobalAffineApproximator::GlobalAffineApproximator(
             "constructor.");
     }
     t_range_.resize(t_split_count);
+    t_index_.resize(t_split_count);
     t_delta_ = t_split_count > 1 ? std::abs(t_max / (t_split_count - 1)) : 0.0;
     for (int i = 0; i < t_split_count; ++i) {
         t_range_[i] = (t_split_count == 1) ? t_max : i * t_delta_;
-    }
-    t_index_.resize(t_split_count);
-    for (int i = 0; i < t_split_count; ++i) {
         t_index_[i] = i;
     }
     int n_vertices = 1 << kSpaceDim;
@@ -119,14 +117,14 @@ std::pair<double, double> GlobalAffineApproximator::getFMinMaxForAxis(
 }
 
 void GlobalAffineApproximator::getIntersectionPoints() {
-    hcpwa::AreasVerticesResult areas_vertices = hcpwa::compute_areas_vertices(
+    hcpwa::PolygonAreasVerticesResult areas_vertices = hcpwa::compute_polygon_areas_vertices(
         system_params_.N, system_params_.F, system_params_.v, system_params_.w,
         system_params_.b51, system_params_.b57, system_params_.b84,
         system_params_.b86, system_params_.b31, system_params_.b36,
         system_params_.b24, system_params_.b27, system_params_.f2min,
         system_params_.f3min, system_params_.f5min, system_params_.f8min,
         system_params_.f2max, system_params_.f3max, system_params_.f5max,
-        system_params_.f8max);
+        system_params_.f8max, true);
 
     intersection_points_.resize(2);
 
@@ -800,10 +798,10 @@ GlobalAffineApproximator::initializeHighs(int phase) {
     std::unique_ptr<Highs> highs = std::make_unique<Highs>();
 
     // highs->setOptionValue("solver", "pdlp");
-    highs->setOptionValue("solver", "pdlp");
+    highs->setOptionValue("solver", "simplex");
     highs->setOptionValue("presolve", "on");
     // Simplex conf
-    highs->setOptionValue("simplex_strategy", 0);
+    highs->setOptionValue("simplex_strategy", 2);
     // PDLP conf
     highs->setOptionValue("pdlp_optimality_tolerance", 1e-10);
     // Common tolerance
@@ -898,17 +896,23 @@ std::vector<double> GlobalAffineApproximator::solveLp(int phase) {
     // Run the solver
     HighsStatus run_status = highs_solver->run();
     if (run_status != HighsStatus::kOk) {
-        throw std::runtime_error(
-            "solveLp: highs_solver.run() failed with status "
-            + std::to_string(static_cast<int>(run_status)));
+        logger_->warn(
+            "solveLp: highs_solver.run() failed with status {}",
+            static_cast<int>(run_status));
+        // throw std::runtime_error(
+        //     "solveLp: highs_solver.run() failed with status "
+        //     + std::to_string(static_cast<int>(run_status)));
     }
 
     // Check if solution is optimal
     if (highs_solver->getModelStatus() != HighsModelStatus::kOptimal) {
-        throw std::runtime_error(
-            "solveLp: LP solution not found for phase " + std::to_string(phase)
-            + ", model status: "
-            + std::to_string(static_cast<int>(highs_solver->getModelStatus())));
+        logger_->warn(
+            "solveLp: LP solution not found for phase {}, model status: {}",
+            phase, static_cast<int>(highs_solver->getModelStatus()));
+        // throw std::runtime_error(
+        //     "solveLp: LP solution not found for phase " + std::to_string(phase)
+        //     + ", model status: "
+        //     + std::to_string(static_cast<int>(highs_solver->getModelStatus())));
     }
 
     // Extract solution

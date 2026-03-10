@@ -36,7 +36,7 @@ TEST(user_algo, compute_areas_vertices) {
     constexpr hcpwa::Float f5max = 10;
     constexpr hcpwa::Float f8max = 10;
 
-    hcpwa::AreasVerticesResult result = hcpwa::compute_areas_vertices(
+    hcpwa::TriangleAreasVerticesResult result = hcpwa::compute_triangle_areas_vertices(
         N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min, f5min,
         f8min, f2max, f3max, f5max, f8max);
 
@@ -166,7 +166,7 @@ TEST(user_algo, compute_areas_vertices_exhaustive) {
     constexpr hcpwa::Float f5max = 10;
     constexpr hcpwa::Float f8max = 10;
 
-    hcpwa::AreasVerticesResult result = hcpwa::compute_areas_vertices(
+    hcpwa::TriangleAreasVerticesResult result = hcpwa::compute_triangle_areas_vertices(
         N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min, f5min,
         f8min, f2max, f3max, f5max, f8max);
 }

@@ -128,9 +128,25 @@ hcpwa::LineSet<8> CalcPrism(const Triangle& triangle,
   return result;
 }
 
-template<int N>
+hcpwa::LineSet<8> CalcPrism(const Polygon& polygon,
+                            const std::array<int, 2>& dims) {
+  std::vector<hcpwa::Line<8>> result;
+  for (int i = 0; i < polygon.size(); i++) {
+    auto a = polygon[i];
+    auto b = polygon[(i + 1) % polygon.size()];
+    auto c = polygon[(i + 2) % polygon.size()];
+    hcpwa::Line<2> line = cross(hcpwa::Vec<3>{a, 1}, hcpwa::Vec<3>{b, 1});
+    if (dot(line, hcpwa::Vec<3>{c, 1}) > 0) {
+      line = -line;
+    }
+    result.push_back(hcpwa::Promote<9>(line, {dims[0], dims[1], 8}));
+  }
+  return result;
+}
+
+template <int N>
 std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data) {
-  cddwrap::matrix<double> inequalities(N+1, data.size());
+  cddwrap::matrix<double> inequalities(N + 1, data.size());
   for (int i = 0; i < data.size(); i++) {
     for (int j = 0; j < N; j++) {
       inequalities[i][j] = (double)data[i][j];
@@ -148,19 +164,24 @@ std::vector<hcpwa::Vec<N>> LinesToPoints(const hcpwa::LineSet<N>& data) {
     for (int n = 0; n < N; n++) {
       point[n] = points[i, n];
     }
-    // result.emplace_back(points[i, 0], points[i, 1], points[i, 2], points[i, 3],
-    //                     points[i, 4], points[i, 5], points[i, 6], points[i, 7]);
+    // result.emplace_back(points[i, 0], points[i, 1], points[i, 2],
+    // points[i, 3],
+    //                     points[i, 4], points[i, 5], points[i, 6],
+    //                     points[i, 7]);
     result.push_back(point);
   }
   return result;
 }
 
-template std::vector<hcpwa::Vec<8>> LinesToPoints(const hcpwa::LineSet<8>& data);
-template std::vector<hcpwa::Vec<3>> LinesToPoints(const hcpwa::LineSet<3>& data);
-template std::vector<hcpwa::Vec<2>> LinesToPoints(const hcpwa::LineSet<2>& data);
+template std::vector<hcpwa::Vec<8>> LinesToPoints(
+    const hcpwa::LineSet<8>& data);
+template std::vector<hcpwa::Vec<3>> LinesToPoints(
+    const hcpwa::LineSet<3>& data);
+template std::vector<hcpwa::Vec<2>> LinesToPoints(
+    const hcpwa::LineSet<2>& data);
 
-
-std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons) {
+std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(
+    const AABB<2>& aabb, std::vector<hcpwa::PolygonResolution>& polygons) {
   using Comp = hcpwa::FixedPrecisionComparator<hcpwa::Vec<2>, 0.01f>;
   hcpwa::UniquePool<hcpwa::Vec<2>> pool(Comp{});
   pool.Unique(aabb.first[0, 1]);
@@ -172,12 +193,9 @@ std::vector<hcpwa::TriangleWithUniqueVertices> GetTrianglesWithUniqueVertices(co
   std::vector<hcpwa::TriangleWithUniqueVertices> result;
   for (std::size_t i = 0; i < triangles.size(); i++) {
     result.push_back(hcpwa::TriangleWithUniqueVertices{
-      triangles[i].first,
-      pool.Index(triangles[i].first.a),
-      pool.Index(triangles[i].first.b),
-      pool.Index(triangles[i].first.c),
-      triangles[i].second
-    });
+        triangles[i].first, pool.Index(triangles[i].first.a),
+        pool.Index(triangles[i].first.b), pool.Index(triangles[i].first.c),
+        triangles[i].second});
   }
   return result;
 }

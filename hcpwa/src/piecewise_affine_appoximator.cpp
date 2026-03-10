@@ -159,7 +159,7 @@ std::pair<double, double> PiecewiseAffineApproximator::getFMinMaxForAxis(
 }
 
 void PiecewiseAffineApproximator::getIntersectionPoints() {
-    hcpwa::AreasVerticesResult areas_vertices = hcpwa::compute_areas_vertices(
+    hcpwa::TriangleAreasVerticesResult areas_vertices = hcpwa::compute_triangle_areas_vertices(
         system_params_.N, system_params_.F, system_params_.v, system_params_.w,
         system_params_.b51, system_params_.b57, system_params_.b84,
         system_params_.b86, system_params_.b31, system_params_.b36,

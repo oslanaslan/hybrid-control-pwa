@@ -7,7 +7,9 @@
 #include <algo.hpp>
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -25,6 +27,35 @@
 #include <spdlog/spdlog.h>
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "util/HighsCDouble.h"
+
+namespace {
+
+// Collects t_index[i] for all i where t_range[i] lies in the interval
+// [low - half_step, high + half_step] (if high_inclusive) or
+// [low - half_step, high - half_step) (if !high_inclusive).
+// Used to replace NumPy-style boolean indexing over the t grid.
+std::vector<int> getTRangeIdsInInterval(
+    const std::vector<double>& t_range, const std::vector<int>& t_index,
+    double half_step, double low, double high, bool high_inclusive) {
+    std::vector<int> result;
+    for (size_t i = 0; i < t_range.size(); ++i) {
+        if (t_range[i] < low - half_step) {
+            continue;
+        }
+        if (high_inclusive) {
+            if (t_range[i] <= high + half_step) {
+                result.push_back(t_index[i]);
+            }
+        } else {
+            if (t_range[i] < high - half_step) {
+                result.push_back(t_index[i]);
+            }
+        }
+    }
+    return result;
+}
+
+}  // namespace
 
 namespace global_affine_approximator {
 
@@ -74,6 +105,47 @@ GlobalAffineApproximator::GlobalAffineApproximator(
     }
     logger_ = spdlog::stdout_color_mt("affine_approximator");
     logger_->set_level(spdlog::level::info);
+}
+
+void GlobalAffineApproximator::dumpInitParamsToJson(
+    const std::string& filepath) const {
+    const SystemParams& p = system_params_;
+    std::ostringstream out;
+    out << "{\n"
+        << "  \"t_max\": " << t_max_ << ",\n"
+        << "  \"t_split_count\": " << t_split_count_ << ",\n"
+        << "  \"max_switches\": " << max_switches_ << ",\n"
+        << "  \"tau_min\": " << tau_min_ << ",\n"
+        << "  \"tau_max\": " << tau_max_ << ",\n"
+        << "  \"system_params\": {\n"
+        << "    \"N\": " << p.N << ",\n"
+        << "    \"F\": " << p.F << ",\n"
+        << "    \"v\": " << p.v << ",\n"
+        << "    \"w\": " << p.w << ",\n"
+        << "    \"b51\": " << p.b51 << ",\n"
+        << "    \"b57\": " << p.b57 << ",\n"
+        << "    \"b84\": " << p.b84 << ",\n"
+        << "    \"b86\": " << p.b86 << ",\n"
+        << "    \"b31\": " << p.b31 << ",\n"
+        << "    \"b36\": " << p.b36 << ",\n"
+        << "    \"b24\": " << p.b24 << ",\n"
+        << "    \"b27\": " << p.b27 << ",\n"
+        << "    \"f2min\": " << p.f2min << ",\n"
+        << "    \"f3min\": " << p.f3min << ",\n"
+        << "    \"f5min\": " << p.f5min << ",\n"
+        << "    \"f8min\": " << p.f8min << ",\n"
+        << "    \"f2max\": " << p.f2max << ",\n"
+        << "    \"f3max\": " << p.f3max << ",\n"
+        << "    \"f5max\": " << p.f5max << ",\n"
+        << "    \"f8max\": " << p.f8max << "\n"
+        << "  }\n"
+        << "}\n";
+    std::ofstream f(filepath);
+    if (!f) {
+        throw std::runtime_error("dumpInitParamsToJson: cannot open file " +
+                                filepath + " for writing");
+    }
+    f << out.str();
 }
 
 double GlobalAffineApproximator::getBetaParamForAxis(int i, int j) const {
@@ -967,7 +1039,14 @@ void GlobalAffineApproximator::precomputeMatrices() {
     logger_->info("Finished precomputeMatrices");
 }
 
-void GlobalAffineApproximator::run() {
+void GlobalAffineApproximator::run(const std::string& output_folder_path) {
+    const std::filesystem::path out_path(output_folder_path);
+    if (!std::filesystem::exists(out_path) ||
+        !std::filesystem::is_directory(out_path)) {
+        throw std::runtime_error(
+            "output_folder_path does not exist or is not a directory: " +
+            output_folder_path);
+    }
     logger_->info("Starting affine approximator");
     getIntersectionPoints();
     precomputeMatrices();
@@ -1003,19 +1082,9 @@ void GlobalAffineApproximator::run() {
             double theta_min = t_min;
             double theta_max = std::min(t_max + this->tau_max_, this->t_max_);
 
-            // Replace NumPy-style boolean indexing with C++ loop
-            std::vector<int> theta_range_ids;
-            for (int i = 0; i < this->t_range_.size(); ++i) {
-                // t_theta_mina and theta might appear to be aligned with "t"
-                // grid nodes and that can cause instable behaviour due to
-                // numerical errors. Make a t_delta half-size step to ensure not
-                // a small gap between the grid nodes and possible same values
-                // representing segment borders
-                if (this->t_range_[i] >= (theta_min - half_step)
-                    && this->t_range_[i] <= (theta_max + half_step)) {
-                    theta_range_ids.push_back(this->t_index_[i]);
-                }
-            }
+            std::vector<int> theta_range_ids = getTRangeIdsInInterval(
+                this->t_range_, this->t_index_, half_step, theta_min,
+                theta_max, true);
 
             std::vector<double> theta_range;
             theta_range.reserve(theta_range_ids.size());
@@ -1031,19 +1100,9 @@ void GlobalAffineApproximator::run() {
                 logger_->info("Computing value function for theta_idx {}", theta_idx);
                 double t_theta_min = max(theta - this->tau_max_, t_min);
 
-                // Replace NumPy-style boolean indexing with C++ loop
-                std::vector<int> t_theta_range_ids;
-                for (int i = 0; i < this->t_range_.size(); ++i) {
-                    // t_theta_mina and theta might appear to be aligned with
-                    // "t" grid nodes and that can cause instable behaviour due
-                    // to numerical errors. Make a t_delta half-size step to
-                    // ensure not a small gap between the grid nodes and
-                    // possible same values representing segment borders
-                    if (this->t_range_[i] >= (t_theta_min - half_step)
-                        && this->t_range_[i] < (theta - half_step)) {
-                        t_theta_range_ids.push_back(this->t_index_[i]);
-                    }
-                }
+                std::vector<int> t_theta_range_ids = getTRangeIdsInInterval(
+                    this->t_range_, this->t_index_, half_step, t_theta_min,
+                    theta, false);
 
                 int switch_phase = phase == 0 ? 1 : 0;
                 std::vector<double> v_prev = getBorderConditions(
@@ -1085,5 +1144,12 @@ void GlobalAffineApproximator::run() {
             }
         }
     }
+
+    // Save results
+    const std::filesystem::path base(output_folder_path);
+    hcpwa::util::dumpValueFunctionToJson(value_function_,
+                                         (base / "value_function.json").string());
+    hcpwa::util::dumpVectorToJson(t_range_, (base / "t_range.json").string());
+    dumpInitParamsToJson((base / "init_params.json").string());
 }
 }  // namespace global_affine_approximator

@@ -5,7 +5,9 @@
 #include <Eigen/Dense>
 #include <Highs.h>
 #include <cstddef>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -153,7 +155,9 @@ class GlobalAffineApproximator {
 
     void precomputeMatrices();
 
-    void run();
+    void run(const std::string& output_folder_path);
+
+    void dumpInitParamsToJson(const std::string& filepath) const;
 
     void buildLPSegmentForJ(
         const Eigen::MatrixXd& Aj, const Eigen::VectorXd& fj,

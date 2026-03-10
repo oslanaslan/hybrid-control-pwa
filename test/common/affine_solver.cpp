@@ -55,5 +55,5 @@ create_linear_approximator() {
 TEST(common, affine_solver) {
     auto linear_approximator = create_linear_approximator();
 
-    linear_approximator.run();
+    linear_approximator.run(".");
 }

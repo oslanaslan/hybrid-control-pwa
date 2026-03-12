@@ -945,8 +945,14 @@ void GlobalAffineApproximator::updateHighsRhsUpperBounds(
       }
       b_upd += v_prev_vec[kSpaceDim];
       new_row_upper[j] = row_upper[j] + b_upd;  // +kappa
+      if (std::abs(new_row_upper[j]) <= kEps) {
+        new_row_upper[j] = 0.0;
+      }
       j++;
       new_row_upper[j] = row_upper[j] - b_upd;  // -kappa
+      if (std::abs(new_row_upper[j]) <= kEps) {
+        new_row_upper[j] = 0.0;
+      }
       j++;
     }
   }

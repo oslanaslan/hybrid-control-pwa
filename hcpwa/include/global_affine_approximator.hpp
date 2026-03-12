@@ -28,7 +28,7 @@ extern const int kPhases;
 constexpr int kSpaceDim = 8;
 constexpr int kVDeltaDim = kSpaceDim + 1;            // [V, v]
 constexpr int kLPCols = kVDeltaDim + 1 + kSpaceDim;  // [V, v, z, s]
-constexpr double kEps = 1e-6;
+constexpr double kEps = 1e-5;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 

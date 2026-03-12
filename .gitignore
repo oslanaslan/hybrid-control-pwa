@@ -35,3 +35,4 @@ Testing
 *.exe
 *.out
 *.app
+copy_to_pod.sh

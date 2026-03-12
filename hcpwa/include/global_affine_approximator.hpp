@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -30,20 +31,6 @@ constexpr int kLPCols = kVDeltaDim + 1 + kSpaceDim;  // [V, v, z, s]
 constexpr double kEps = 1e-6;
 
 using ValueFunction = hcpwa::util::ValueFunction;
-
-inline void setValueFunction(ValueFunction& value_function, int phase, int r,
-                             int theta_idx, int theta_end_idx,
-                             const std::vector<double>& x_prev) {
-    hcpwa::util::setValueFunction(value_function, phase, r, theta_idx,
-                                  theta_end_idx, x_prev, kVDeltaDim);
-}
-
-inline std::vector<double> getValueFunction(ValueFunction& value_function,
-                                            int phase, int r, int theta_idx,
-                                            int theta_end_idx) {
-    return hcpwa::util::getValueFunction(value_function, phase, r, theta_idx,
-                                         theta_end_idx);
-}
 
 struct SystemParams {
     double N;
@@ -100,6 +87,7 @@ class GlobalAffineApproximator {
     std::vector<std::unique_ptr<Highs>> highs_solvers_;
     std::vector<std::vector<double>> row_lowers_;
     std::vector<std::vector<double>> row_uppers_;
+    std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
    public:
     GlobalAffineApproximator(double t_max, int t_split_count, int max_switches,
@@ -148,14 +136,14 @@ class GlobalAffineApproximator {
     std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
     initializeHighs(int phase);
 
-    void updateHighsRhsUpperBounds(int phase,
+    void updateHighsRhsUpperBounds(int phase, int solver_index,
                                    const std::vector<double>& x_prev_vec);
 
-    std::vector<double> solveLp(int phase);
+    std::vector<double> solveLp(int solver_index);
 
     void precomputeMatrices();
 
-    void run(const std::string& output_folder_path);
+    void run(const std::string& output_folder_path, int n_threads = 1);
 
     void dumpInitParamsToJson(const std::string& filepath) const;
 

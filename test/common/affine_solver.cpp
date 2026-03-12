@@ -5,7 +5,7 @@
 #include <uniqie_pool.hpp>
 #include <symbolic.hpp>
 #include <Eigen/Dense>
-#include <global_affine_approximator.h>
+#include <global_affine_approximator.hpp>
 #include "utility.hpp"
 
 #include "morph.hpp"
@@ -55,5 +55,5 @@ create_linear_approximator() {
 TEST(common, affine_solver) {
     auto linear_approximator = create_linear_approximator();
 
-    linear_approximator.run(".");
+    linear_approximator.run(".", 100);
 }

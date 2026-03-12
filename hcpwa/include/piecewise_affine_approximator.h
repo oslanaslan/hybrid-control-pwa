@@ -28,26 +28,6 @@ constexpr double kEps = 1e-6;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 
-inline void setValueFunction(ValueFunction& value_function,
-                             int phase,
-                             int r,
-                             int theta_idx,
-                             int theta_end_idx,
-                             const std::vector<double>& x_prev,
-                             std::size_t expected_size) {
-    hcpwa::util::setValueFunction(value_function, phase, r, theta_idx,
-                                  theta_end_idx, x_prev, expected_size);
-}
-
-inline std::vector<double> getValueFunction(ValueFunction& value_function,
-                                            int phase,
-                                            int r,
-                                            int theta_idx,
-                                            int theta_end_idx) {
-    return hcpwa::util::getValueFunction(value_function, phase, r, theta_idx,
-                                         theta_end_idx);
-}
-
 struct VarLayout {
     std::array<int, kSubsystemCount> M_s{};
     int numV = 0;

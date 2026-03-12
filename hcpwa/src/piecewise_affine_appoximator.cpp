@@ -485,8 +485,7 @@ double PiecewiseAffineApproximator::getBorderFuncValuesAtN(
     int r, int theta_idx, int theta_end_idx, int phase,
     const Eigen::VectorXd& n) {
     try {
-        const auto x = getValueFunction(value_function_, phase, r, theta_idx,
-                                        theta_end_idx);
+        const auto x = value_function_.get(phase, r, theta_idx, theta_end_idx);
         const auto& layout = layouts_.at(phase);
         if (x.size() != static_cast<std::size_t>(layout.numV)) {
             throw std::invalid_argument(
@@ -843,8 +842,8 @@ void PiecewiseAffineApproximator::run() {
                     throw std::invalid_argument("v_prev size must be "
                                                 + std::to_string(layout.numV));
                 }
-                setValueFunction(value_function_, phase, switch_cnt, theta_idx,
-                                 theta_idx, v_prev, layout.numV);
+                value_function_.set(phase, switch_cnt, theta_idx, theta_idx,
+                                    v_prev, layout.numV);
                 updateHighsRhsUpperBounds(phase, v_prev);
 
                 if (t_theta_range_ids.empty()) {
@@ -867,8 +866,8 @@ void PiecewiseAffineApproximator::run() {
                             "v_next size must be "
                             + std::to_string(layout.numV));
                     }
-                    setValueFunction(value_function_, phase, switch_cnt, t_idx,
-                                     theta_idx, v_next, layout.numV);
+                    value_function_.set(phase, switch_cnt, t_idx, theta_idx,
+                                        v_next, layout.numV);
                     updateHighsRhsUpperBounds(phase, v_next);
                     v_prev = v_next;
                 }

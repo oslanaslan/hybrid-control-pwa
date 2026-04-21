@@ -3,9 +3,12 @@
 #include "util/affine_lp_utils.hpp"
 #include "util/assert_utils.hpp"
 #include "util/sparse_matrix_utils.hpp"
+#include "utility.hpp"
+#include <iostream>
 
 #include <algo.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <format>
@@ -32,6 +35,11 @@
 #include <future>
 
 namespace {
+
+// HiGHS stopping tolerances (tighter than defaults / previous 1e-5).
+constexpr double kHighsSolutionTol = 1e-6;
+constexpr double kHighsSmallMatrixValue = 1e-9;
+constexpr double kHighsPdlpOptimalityTol = 1e-6;
 
 // Collects t_index[i] for all i where t_range[i] lies in the interval
 // [low - half_step, high + half_step] (if high_inclusive) or
@@ -68,14 +76,14 @@ const std::vector<int> kOutIds = {1 - 1, 4 - 1, 6 - 1, 7 - 1};
 const int kPhases = 2;
 
 GlobalAffineApproximator::GlobalAffineApproximator(
-    double t_max, int t_split_count, int max_switches, double tau_min,
-    double tau_max, const SystemParams& system_params)
+    double t_max, int t_split_count, double tau_min, double tau_max,
+    const SystemParams& system_params, bool highs_verbose)
     : t_max_(t_max),
       t_split_count_(t_split_count),
-      max_switches_(max_switches),
       tau_min_(tau_min),
       tau_max_(tau_max),
-      system_params_(system_params) {
+      system_params_(system_params),
+      highs_verbose_(highs_verbose) {
   if (t_split_count < 1) {
     throw std::invalid_argument(
         "t_split_count must be at least 1 in GlobalAffineApproximator "
@@ -86,11 +94,7 @@ GlobalAffineApproximator::GlobalAffineApproximator(
         "tau_min must be less than tau_max and both must be >= 0 in "
         "GlobalAffineApproximator constructor.");
   }
-  if (max_switches < 1) {
-    throw std::invalid_argument(
-        "max_switches must be at least 1 in GlobalAffineApproximator "
-        "constructor.");
-  }
+  max_switches_ = static_cast<int>(std::ceil(t_max_ / tau_min_));
   t_range_.resize(t_split_count);
   t_index_.resize(t_split_count);
   t_delta_ = t_split_count > 1 ? std::abs(t_max / (t_split_count - 1)) : 0.0;
@@ -107,8 +111,14 @@ GlobalAffineApproximator::GlobalAffineApproximator(
     }
     cube_angle_vertices_.push_back(v);
   }
+  theta_t_index_lists_ = interval_building::buildThetaToTIndexLists(
+      t_max_, tau_min_, tau_max_, t_range_, max_switches_);
   logger_ = spdlog::stdout_color_mt("affine_approximator");
   logger_->set_level(spdlog::level::info);
+
+  if (highs_verbose_) {
+    interval_building::prettyPrintThetaTLists(theta_t_index_lists_, t_range_);
+  }
 }
 
 void GlobalAffineApproximator::dumpInitParamsToJson(
@@ -415,7 +425,7 @@ GlobalAffineApproximator::getQQForArea(int j, int phase) const {
       q_lower_vec(i) = f_min;
     } else {
       Q_lower_matr(i, i) = -w;
-      Q_lower_matr(i) = w * N;
+      q_lower_vec(i) = w * N;
     }
     // upper
     if (f_max < w * (N - ni)) {
@@ -698,18 +708,35 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
 double GlobalAffineApproximator::getBorderFuncValuesAtN(
     int r, int theta_idx, int theta_end_idx, int phase,
     const Eigen::VectorXd& n) {
+  std::vector<double> x;
   try {
-    std::vector<double> x
-        = value_function_.get(phase, r, theta_idx, theta_end_idx);
-    double result = 0.0;
-    for (int i = 0; i < kSpaceDim; ++i) {
-      result += x[i] * n(i);
-    }
-    result += x[kSpaceDim + 1];
-    return result;
+    x = value_function_.get(phase, r, theta_idx, theta_end_idx);
   } catch (const std::invalid_argument&) {
-    return -std::numeric_limits<double>::infinity();
+    // TDODO: think later about the correct value: 0 or -inf
+    // return -std::numeric_limits<double>::infinity();
+    return 0.0;
   }
+  if (x.size() != kVDeltaDim) {
+    logger_->error(
+        "getBorderFuncValuesAtN: invalid value_function size {} (expected {}) "
+        "for phase={}, r={}, theta_idx={}, theta_end_idx={}",
+        x.size(), kVDeltaDim, phase, r, theta_idx, theta_end_idx);
+    throw std::runtime_error(
+        "getBorderFuncValuesAtN: invalid value_function vector size");
+  }
+  double result = 0.0;
+  for (int i = 0; i < kSpaceDim; ++i) {
+    result += x[i] * n(i);
+  }
+  result += x[kSpaceDim];
+  if (!std::isfinite(result)) {
+    logger_->error(
+        "getBorderFuncValuesAtN: non-finite result for phase={}, r={}, "
+        "theta_idx={}, theta_end_idx={}, n_norm={}",
+        phase, r, theta_idx, theta_end_idx, n.norm());
+    throw std::runtime_error("getBorderFuncValuesAtN: non-finite result");
+  }
+  return result;
 }
 
 double GlobalAffineApproximator::getMaxBorderFuncValuesAtN(
@@ -723,6 +750,17 @@ double GlobalAffineApproximator::getMaxBorderFuncValuesAtN(
       max_val = std::max(max_val, val);
     }
   }
+
+  // Value function is \geq 0 when computed so if max_val < 0, it means that no
+  // any value function is computed for this theta_idx, theta_end_idx, phase, n
+  // and that is an error.
+  if (max_val < -kEps) {
+    throw std::runtime_error(
+        std::format("getMaxBorderFuncValuesAtN: max_val < 0 for theta_idx: {}, "
+                    "max_switches: {}, phase: {}, max_val: {}",
+                    theta_idx, max_switches, phase, max_val));
+  }
+
   return max_val;
 }
 
@@ -732,63 +770,68 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
   if (switch_cnt == 0) {
     return std::vector<double>(kVDeltaDim, 0.0);
   }
+  Highs highs;
 
   // Calculate theta_min and theta_max
   double theta_min = std::min(theta + this->tau_min_, this->t_max_);
   double theta_max = std::min(theta + this->tau_max_, this->t_max_);
 
-  // Find theta_range_ids using loop (replacing NumPy boolean indexing)
-  // avoid numerical errors by adding a half-size step to the theta_min and
-  // theta_max
-  double half_step = this->t_delta_ / 2.0;
-  theta_min -= half_step;
-  theta_max += half_step;
-  std::vector<int> theta_range_ids;
-  for (int i = 0; i < this->t_range_.size(); ++i) {
-    if (this->t_range_[i] >= theta_min && this->t_range_[i] <= theta_max) {
-      theta_range_ids.push_back(this->t_index_[i]);
-    }
-  }
+  const double half_step = this->t_delta_ / 2.0;
+  std::vector<int> theta_range_ids = getTRangeIdsInInterval(
+      this->t_range_, this->t_index_, half_step, theta_min, theta_max, true);
 
   if (theta_range_ids.empty()) {
     throw std::runtime_error("getBorderConditions: No theta range found");
   }
 
   // Initialize c_vec as zeros
-  std::vector<double> c_vec(kSpaceDim + 1, 0.0);
+  std::vector<double> c_vec(kVDeltaDim + 1, 0.0);
+  c_vec[kVDeltaDim] = 1.0;  // z
 
   // Build a_matr and b_vec
   std::vector<std::vector<double>> a_matr_lst;
-  std::vector<double> b_vec_lst;
+  std::vector<double> b_vec_lower_lst;
+  std::vector<double> b_vec_upper_lst;
+  // auto inf = std::numeric_limits<double>::infinity();
+  const double inf = highs.getInfinity();
 
   for (const auto& vertex : this->cube_angle_vertices_) {
     double f_scal = getMaxBorderFuncValuesAtN(theta_idx, theta_range_ids,
                                               switch_cnt, switch_phase, vertex);
+    if (!std::isfinite(f_scal)) {
+      logger_->error(
+          "getBorderConditions: non-finite f_scal for switch_phase={}, "
+          "theta_idx={}, theta={}, switch_cnt={}, vertex_norm={}",
+          switch_phase, theta_idx, theta, switch_cnt, vertex.norm());
+      throw std::runtime_error("getBorderConditions: non-finite f_scal");
+    }
 
-    // Build row: [vertex, 1]
-    std::vector<double> row(kSpaceDim + 1);
+    // Build row: [vertex, 1, 0] for Ax >= b
+    std::vector<double> row_lower(kVDeltaDim + 1);
+    // Build row: [vertex, 1, 0] for z >= Ax -> Ax - z <= 0
+    std::vector<double> row_upper(kVDeltaDim + 1);
     for (int i = 0; i < kSpaceDim; ++i) {
-      row[i] = vertex(i);  // V
+      row_lower[i] = vertex(i);  // V
+      row_upper[i] = vertex(i);  // V
     }
-    row[kSpaceDim] = 1.0;  // v
+    row_lower[kVDeltaDim - 1] = 1.0;  // v
+    row_lower[kVDeltaDim] = 0.0;      // z
+    row_upper[kVDeltaDim - 1] = 1.0;  // v
+    row_upper[kVDeltaDim] = -1.0;     // z
 
-    // Accumulate into c_vec
-    for (int i = 0; i < c_vec.size(); ++i) {
-      c_vec[i] += row[i];
-    }
-
-    b_vec_lst.push_back(f_scal);
-    a_matr_lst.push_back(row);
+    b_vec_lower_lst.push_back(f_scal);
+    b_vec_upper_lst.push_back(inf);
+    b_vec_lower_lst.push_back(-inf);
+    b_vec_upper_lst.push_back(0);
+    a_matr_lst.push_back(row_lower);
+    a_matr_lst.push_back(row_upper);
   }
 
   // Convert a_matr_lst to a single matrix (for Highs sparse format)
-  const int m = static_cast<int>(a_matr_lst.size());  // 2^kSpaceDim
-  const int n = static_cast<int>(c_vec.size());       // kSpaceDim + 1
+  const int m = static_cast<int>(a_matr_lst.size());  // 2 * 2^kSpaceDim
+  const int n = static_cast<int>(c_vec.size());       // kSpaceDim + 2
 
   // Build sparse matrix representation for Highs
-  // For constraints: -a_matr @ x <= -b_vec  (from Python: A_ub=-a_matr,
-  // b_ub=-b_vec) In Highs format: we need A x <= b, so we use -a_matr and
-  // -b_vec
   std::vector<int> starts(m + 1, 0);
   std::vector<int> col_index;
   std::vector<double> value;
@@ -797,8 +840,8 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
   for (int i = 0; i < m; ++i) {
     starts[i] = nnz;
     for (int j = 0; j < n; ++j) {
-      const double a_val = -a_matr_lst[i][j];  // Negate for constraint format
-      if (std::abs(a_val) > 1e-10) {           // Skip near-zero values
+      const double a_val = a_matr_lst[i][j];
+      if (std::abs(a_val) > 1e-10) {  // Skip near-zero values
         col_index.push_back(j);
         value.push_back(a_val);
         ++nnz;
@@ -807,54 +850,65 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
   }
   starts[m] = nnz;
 
-  // Prepare row bounds: -a_matr @ x <= -b_vec means row_upper = -b_vec,
-  // row_lower = -inf
-  std::vector<double> row_lower(m, -std::numeric_limits<double>::infinity());
-  std::vector<double> row_upper(m);
-  for (int i = 0; i < m; ++i) {
-    row_upper[i] = -b_vec_lst[i];  // Negate b_vec for constraint format
-  }
-
   // Set up and solve LP with Highs
-  Highs highs;
   highs.setOptionValue("solver", "simplex");
   highs.setOptionValue("presolve", "on");
-  highs.setOptionValue("log_to_console", false);
-
-  const double inf = highs.getInfinity();
+  highs.setOptionValue("log_to_console", highs_verbose_);
+  highs.changeObjectiveSense(ObjSense::kMinimize);
+  highs.setOptionValue("kkt_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("optimality_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
 
   // Add columns (variables)
-  std::vector<double> col_lower(n, 0.0);
+  std::vector<double> col_lower(n, -inf);
   std::vector<double> col_upper(n, inf);
 
   HighsStatus st
       = highs.addCols(n, c_vec.data(), col_lower.data(), col_upper.data(), 0,
                       nullptr, nullptr, nullptr);
   if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.addCols failed");
+    throw std::runtime_error(
+        "getBorderConditions: highs.addCols failed for "
+        + std::to_string(switch_phase) + ", " + std::to_string(theta_idx) + ", "
+        + std::to_string(theta) + ", " + std::to_string(switch_cnt));
   }
 
   // Add rows (constraints)
-  st = highs.addRows(m, row_lower.data(), row_upper.data(), nnz, starts.data(),
-                     col_index.data(), value.data());
+  st = highs.addRows(m, b_vec_lower_lst.data(), b_vec_upper_lst.data(), nnz,
+                     starts.data(), col_index.data(), value.data());
   if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.addRows failed");
+    throw std::runtime_error(
+        "getBorderConditions: highs.addRows failed for "
+        + std::to_string(switch_phase) + ", " + std::to_string(theta_idx) + ", "
+        + std::to_string(theta) + ", " + std::to_string(switch_cnt));
   }
 
   // Solve
   st = highs.run();
   if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.run() failed");
+    throw std::runtime_error(
+        "getBorderConditions: highs.run() failed for "
+        + std::to_string(switch_phase) + ", " + std::to_string(theta_idx) + ", "
+        + std::to_string(theta) + ", " + std::to_string(switch_cnt));
   }
 
   if (highs.getModelStatus() != HighsModelStatus::kOptimal) {
-    throw std::runtime_error("getBorderConditions: LP solution not found");
+    throw std::runtime_error(
+        "getBorderConditions: LP solution not found for "
+        + std::to_string(switch_phase) + ", " + std::to_string(theta_idx) + ", "
+        + std::to_string(theta) + ", " + std::to_string(switch_cnt)
+        + ", model status: "
+        + std::to_string(static_cast<int>(highs.getModelStatus())));
   }
 
   // Extract solution
   const auto& solution = highs.getSolution();
   std::vector<double> result(solution.col_value.begin(),
-                             solution.col_value.end());
+                             solution.col_value.end() - 1);  // exclude z
 
   return result;
 }
@@ -873,17 +927,16 @@ GlobalAffineApproximator::initializeHighs(int phase) {
   // Simplex conf
   highs->setOptionValue("simplex_strategy", 2);
   // PDLP conf
-  highs->setOptionValue("pdlp_optimality_tolerance", 1e-10);
-  // Common tolerance
-  highs->setOptionValue("kkt_tolerance", 1e-5);
-  highs->setOptionValue("primal_feasibility_tolerance", 1e-5);
-  highs->setOptionValue("dual_feasibility_tolerance", 1e-5);
-  highs->setOptionValue("primal_residual_tolerance", 1e-5);
-  highs->setOptionValue("dual_residual_tolerance", 1e-5);
-  highs->setOptionValue("optimality_tolerance", 1e-5);
-  highs->setOptionValue("small_matrix_value", 1e-5);
+  highs->setOptionValue("pdlp_optimality_tolerance", kHighsPdlpOptimalityTol);
+  highs->setOptionValue("kkt_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("optimality_tolerance", kHighsSolutionTol);
+  highs->setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
   // Logging and etc
-  highs->setOptionValue("log_to_console", false);
+  highs->setOptionValue("log_to_console", highs_verbose_);
 
   highs->changeObjectiveSense(
       ObjSense::kMaximize);  // Must be maximization because need to maximize
@@ -915,6 +968,17 @@ GlobalAffineApproximator::initializeHighs(int phase) {
                       starts.data(), col_index.data(), value.data());
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("InitializeHighs: highs.addRows failed.");
+  }
+
+  // Warm-start the main LP with x0 = ones, except z = -1.
+  // Layout: [V(kSpaceDim), v, z, s(kSpaceDim)].
+  HighsSolution initial_solution;
+  initial_solution.value_valid = true;
+  initial_solution.col_value.assign(n, 1.0);
+  initial_solution.col_value[kSpaceDim + 1] = -1.0;
+  st = highs->setSolution(initial_solution);
+  if (st != HighsStatus::kOk) {
+    throw std::runtime_error("InitializeHighs: highs.setSolution failed.");
   }
 
   return std::make_tuple<std::unique_ptr<Highs>, std::vector<double>,
@@ -1099,61 +1163,47 @@ void GlobalAffineApproximator::run(const std::string& output_folder_path,
 
   // Update HiGHS solvers for each switch count
   for (int switch_cnt = 0; switch_cnt <= max_switches_; ++switch_cnt) {
-    logger_->info("Computing value function for switch count {}/{}", switch_cnt, max_switches_);
-    double t_min, t_max;
-    if (switch_cnt == 0) {
-      t_min = max(0.0, this->t_max_ - this->tau_max_);
-      t_max = this->t_max_;
-    } else {
-      t_min = max(0.0, this->t_max_ - switch_cnt * this->tau_max_);
-      t_max = this->t_max_ - switch_cnt * this->tau_min_;
-    }
+    logger_->info("Computing value function for switch count {}/{}", switch_cnt,
+                  max_switches_);
 
-    double theta_min = t_min;
-    double theta_max = std::min(t_max + this->tau_max_, this->t_max_);
-
-    std::vector<int> theta_range_ids = getTRangeIdsInInterval(
-        this->t_range_, this->t_index_, half_step, theta_min, theta_max, true);
-
-    std::vector<double> theta_range;
-    theta_range.reserve(theta_range_ids.size());
-    for (int idx : theta_range_ids) {
-      theta_range.push_back(this->t_range_[idx]);
-    }
-
-    const auto n = static_cast<std::ptrdiff_t>(theta_range.size());
+    auto theta_range_ids
+        = theta_t_index_lists_.expanded_t_by_k_theta[switch_cnt];
+    const auto n = static_cast<std::ptrdiff_t>(theta_range_ids.size());
     std::vector<std::future<void>> futures;
     futures.reserve(static_cast<size_t>(n * kPhases));
 
-    for (std::ptrdiff_t itheta_idx = n - 1; itheta_idx >= 0; --itheta_idx) {
+    for (auto [theta_idx, t_range_ids] : theta_range_ids) {
       for (int phase = 0; phase < kPhases; ++phase) {
-        futures.push_back(pool.enqueue([this, switch_cnt, phase, itheta_idx,
-                                        &theta_range_ids, &theta_range, t_min,
-                                        half_step, n_threads]() {
+        const int solver_index
+            = phase * (n_threads / 2)
+              + (static_cast<int>(theta_idx) % (n_threads / 2));
+        futures.push_back(pool.enqueue([this, switch_cnt, phase, theta_idx,
+                                        t_range_ids, solver_index]() {
+          const double theta = t_range_[theta_idx];
           logger_->info(
-              "Starting computation for theta_idx {}, phase {}, switch_cnt {}",
-              itheta_idx, phase, switch_cnt);
-          const int theta_idx = theta_range_ids[itheta_idx];
-          const double theta = theta_range[itheta_idx];
-          const int solver_index
-              = phase * (n_threads / 2)
-                + (static_cast<int>(itheta_idx) % (n_threads / 2));
+              "Starting computation for theta_idx: {}, phase: {}, switch_cnt: "
+              "{}",
+              theta_idx, phase, switch_cnt);
 
           std::lock_guard<std::mutex> lock(*solver_mutexes_[solver_index]);
 
-          const double t_theta_min = max(theta - this->tau_max_, t_min);
-          std::vector<int> t_theta_range_ids
-              = getTRangeIdsInInterval(this->t_range_, this->t_index_,
-                                       half_step, t_theta_min, theta, false);
-          int switch_phase = phase == 0 ? 1 : 0;
-          std::vector<double> v_prev
-              = getBorderConditions(switch_phase, theta_idx, theta, switch_cnt);
-          if (v_prev.size() != kVDeltaDim) {
-            throw std::invalid_argument("v_prev size must be "
-                                        + std::to_string(kVDeltaDim));
-          }
-          value_function_.set(phase, switch_cnt, theta_idx, theta_idx, v_prev,
-                              kVDeltaDim);
+          // int switch_phase = phase == 0 ? 1 : 0;
+          // std::vector<double> v_prev
+          //     = getBorderConditions(switch_phase, theta_idx, theta,
+          //     switch_cnt);
+          // if (v_prev.size() != kVDeltaDim) {
+          //   throw std::invalid_argument("v_prev size must be "
+          //                               + std::to_string(kVDeltaDim));
+          // }
+          // value_function_.set(phase, switch_cnt, theta_idx, theta_idx,
+          // v_prev,
+          //                     kVDeltaDim);
+
+          // auto [min_val, max_val, free_val] = MinMaxVAndAffineTerm(v_prev);
+          // logger_->debug(
+          //     "Border conditions min and max at theta_idx: {}, phase: {}, "
+          //     "switch_cnt: {}: \t{:.4f}\t{:.4f}\t{:.4f}",
+          //     theta_idx, phase, switch_cnt, min_val, max_val, free_val);
 
           // if (t_theta_range_ids.empty()) {
           //   throw std::runtime_error(
@@ -1163,25 +1213,49 @@ void GlobalAffineApproximator::run(const std::string& output_folder_path,
           //       + ", theta = " + std::to_string(theta));
           // }
 
-          // Value function at theta must be computed anyway, but if range is
-          // empty no need to update RHS
-          if (!t_theta_range_ids.empty()) {
-            updateHighsRhsUpperBounds(phase, solver_index, v_prev);
+          std::vector<double> v_next, v_prev;
+          const auto n_t = static_cast<std::ptrdiff_t>(t_range_ids.size());
+          if (n_t == 0) {
+            throw std::runtime_error(
+                "run: empty t_range_ids for theta_idx=" + std::to_string(theta_idx)
+                + ", phase=" + std::to_string(phase)
+                + ", switch_cnt=" + std::to_string(switch_cnt));
+          }
 
-            const auto n_t
-                = static_cast<std::ptrdiff_t>(t_theta_range_ids.size());
-            for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0; --i_t_idx) {
-              int t_idx = t_theta_range_ids[i_t_idx];
-              std::vector<double> v_next = solveLp(solver_index);
-              if (v_next.size() != kVDeltaDim) {
-                throw std::invalid_argument("v_next size must be "
-                                            + std::to_string(kVDeltaDim));
+          for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0; --i_t_idx) {
+            int t_idx = t_range_ids[i_t_idx];
+
+            if (i_t_idx == n_t - 1) {
+              // Last element of the range must be a switch time at which we
+              // compute the value border conditions
+              if (t_idx != theta_idx) {
+                throw std::runtime_error("t_idx != theta_idx: "
+                                         + std::to_string(t_idx)
+                                         + " != " + std::to_string(theta_idx));
               }
-              value_function_.set(phase, switch_cnt, t_idx, theta_idx, v_next,
-                                  kVDeltaDim);
-              updateHighsRhsUpperBounds(phase, solver_index, v_next);
-              v_prev = std::move(v_next);
+              int switch_phase = phase == 0 ? 1 : 0;
+              v_next = getBorderConditions(switch_phase, theta_idx, theta,
+                                           switch_cnt);
+            } else {
+              updateHighsRhsUpperBounds(phase, solver_index, v_prev);
+              v_next = solveLp(solver_index);
             }
+
+            if (v_next.size() != kVDeltaDim) {
+              throw std::invalid_argument("v_next size must be "
+                                          + std::to_string(kVDeltaDim));
+            }
+            value_function_.set(phase, switch_cnt, t_idx, theta_idx, v_next,
+                                kVDeltaDim);
+            auto [min_val, max_val, free_val] =
+                MinMaxVAndAffineTerm(v_next, kSpaceDim);
+            logger_->info(
+                "Value function min and max at t_idx: {}, theta_idx: {}, "
+                "phase: {}, "
+                "switch_cnt: {}: \t{:.4f}\t{:.4f}\t{:.4f}",
+                t_idx, theta_idx, phase, switch_cnt, min_val, max_val,
+                free_val);
+            v_prev = std::move(v_next);
           }
         }));
       }

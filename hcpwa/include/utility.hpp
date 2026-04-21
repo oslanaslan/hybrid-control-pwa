@@ -4,6 +4,9 @@
 #include <cstddef>
 #include <utility>
 #include <functional>
+#include <array>
+#include <stdexcept>
+#include <vector>
 
 template <typename T>
 struct defer {
@@ -36,6 +39,28 @@ struct Timer {
     return res;
   }
 };
+
+// vec is [V_0..V_{space_dim-1}, v]; returns {min(V), max(V), v}.
+inline std::array<double, 3> MinMaxVAndAffineTerm(
+    const std::vector<double>& vec, int space_dim = 8) {
+  const std::size_t need = static_cast<std::size_t>(space_dim) + 1;
+  if (vec.size() < need) {
+    throw std::invalid_argument(
+        "MinMaxVAndAffineTerm: vector must have at least space_dim+1 elements");
+  }
+  double min_val = vec[0];
+  double max_val = vec[0];
+  for (int i = 1; i < space_dim; ++i) {
+    const std::size_t j = static_cast<std::size_t>(i);
+    if (vec[j] < min_val) {
+      min_val = vec[j];
+    }
+    if (vec[j] > max_val) {
+      max_val = vec[j];
+    }
+  }
+  return {min_val, max_val, vec[static_cast<std::size_t>(space_dim)]};
+}
 
 #define temp_variable(S) v_##S##__
 #define temp_variable_line(L) temp_variable(L)

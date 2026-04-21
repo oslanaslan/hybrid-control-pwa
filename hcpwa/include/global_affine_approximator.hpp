@@ -18,6 +18,7 @@
 
 #include "util/assert_utils.hpp"
 #include "util/value_function_utils.hpp"
+#include "interval_building.hpp"
 
 namespace global_affine_approximator {
 
@@ -68,6 +69,8 @@ class GlobalAffineApproximator {
     std::vector<double> t_range_;
     std::vector<int> t_index_;
 
+    bool highs_verbose_ = false;
+
     ValueFunction value_function_;
     std::vector<Eigen::VectorXd> cube_angle_vertices_;
     std::vector<std::vector<std::vector<Eigen::VectorXd>>> intersection_points_;
@@ -89,10 +92,13 @@ class GlobalAffineApproximator {
     std::vector<std::vector<double>> row_uppers_;
     std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
+    interval_building::ThetaTIndexLists theta_t_index_lists_;
+
    public:
-    GlobalAffineApproximator(double t_max, int t_split_count, int max_switches,
+    GlobalAffineApproximator(double t_max, int t_split_count,
                              double tau_min, double tau_max,
-                             const SystemParams& system_params);
+                             const SystemParams& system_params,
+                             bool highs_verbose = false);
 
     double getBetaParamForAxis(int i, int j) const;
 
@@ -143,7 +149,7 @@ class GlobalAffineApproximator {
 
     void precomputeMatrices();
 
-    void run(const std::string& output_folder_path, int n_threads = 1);
+    void run(const std::string& output_folder_path, int n_threads = 2);
 
     void dumpInitParamsToJson(const std::string& filepath) const;
 

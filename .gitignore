@@ -36,3 +36,8 @@ Testing
 *.out
 *.app
 copy_to_pod.sh
+
+.DS_Store
+.cursor/
+docs/
+download_results.sh

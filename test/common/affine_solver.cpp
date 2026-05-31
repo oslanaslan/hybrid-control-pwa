@@ -20,14 +20,14 @@ create_linear_approximator() {
   constexpr double F = 0.5;
   constexpr double v = 0.017;
   constexpr double w = 0.0055;
-  constexpr double b51 = 0.5;
-  constexpr double b57 = 0.5;
-  constexpr double b84 = 0.5;
-  constexpr double b86 = 0.5;
-  constexpr double b31 = 0.5;
-  constexpr double b36 = 0.5;
-  constexpr double b24 = 0.5;
-  constexpr double b27 = 0.5;
+  constexpr double b51 = 0.6;
+  constexpr double b57 = 0.4;
+  constexpr double b84 = 0.8;
+  constexpr double b86 = 0.2;
+  constexpr double b31 = 0.6;
+  constexpr double b36 = 0.4;
+  constexpr double b24 = 0.7;
+  constexpr double b27 = 0.3;
   // constexpr double f2min = 0.44;
   // constexpr double f3min = 0.23;
   // constexpr double f5min = 0.09;
@@ -56,7 +56,7 @@ create_linear_approximator() {
   constexpr double tau_min = 60;
   constexpr double tau_max = 120;
   // constexpr double t_max = 1.0;
-  constexpr int t_split_count = 100;
+  constexpr int t_split_count = 1000;
   // constexpr int max_switches = 5;
 
   return global_affine_approximator::GlobalAffineApproximator(

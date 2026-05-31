@@ -511,27 +511,18 @@ GlobalAffineApproximator::precomputeSystemMatrices(int phase) {
                          g_j_vecs_lst, g_j_scals_lst);
 }
 
-// ---------- Main builder: builds the (j)-segment for vertex constraints only
+// ---------- Main builder: builds the (j)-segment feasibility rows only
 // ----------
 //
-// Decision vector is x = [ V ; v ; z ; s ], size = (m) + 1 + 1 + (m) = 2m+2
+// Decision vector is x = [ V ; v ; s ], size = (m) + 1 + (m) = 2m+1.
 //
-// For each vertex n in vertices_j, we add TWO constraints:
+// For each vertex n in vertices_j, we add ONE feasibility constraint:
 //
-// (MIN_w constraint)
-//   -p(n)^T V + 1*v + 1*z + dt*r(n)^T s <=  kappa(n)
-//
-// (MAX_w constraint)
-//    p(n)^T V - 1*v + 0*z + dt*r(n)^T s <= -kappa(n)
+//    p(n)^T V - 1*v + dt*r(n)^T s <= -kappa(n)
 //
 // Right-hand side is split:
-//   kappa(n) = kappa_fix(n) + kappa_t(n)
-// so we output b_fix and b_t s.t. b = b_fix + b_t.
-//
-// NOTE: This function builds only the vertex-based constraints for the given j.
-//       The "s >= V", "s >= -V", "s >= 0" blocks are time-invariant and
-//       j-invariant; you can build them once and append to the global LP
-//       outside.
+//   -kappa(n) = -kappa_fix(n) - kappa_t(n)
+// where kappa_t(n) = V_prev^T n + v_prev is applied later via RHS updates.
 //
 void GlobalAffineApproximator::buildLPSegmentForJ(
     const Eigen::MatrixXd& Aj,   // A^{(j)} (m x m)
@@ -550,15 +541,14 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
     std::vector<int>& cols,       // Column indices (CSR)
     std::vector<double>& values,  // Nonzero values (CSR)
     std::vector<double>&
-        b_fixed  // b_fixed elements (LP: Ax <= b_foxed + b_{t+1})
-) {
+        b_fixed,  // fixed RHS part of Ax <= b_fixed + b_time
+    Eigen::VectorXd& obj_p_accum, int& vertex_count) {
   if (vertices_j.empty()) {
     throw std::runtime_error("build_lp_segment_for_j: vertices_j is empty.");
   }
 
   const int n_vertices = static_cast<int>(vertices_j.size());
-  const int n_rows = 2 * n_vertices;  // two constraints per vertex
-  const int n_cols = kLPCols;         // [V(m), v(1), z(1), s(m)]
+  const int n_cols = kLPCols;  // [V(m), v(1), s(m)]
 
   // Basic dimension checks (lightweight)
   if (Aj.rows() != kSpaceDim || Aj.cols() != kSpaceDim) {
@@ -583,10 +573,6 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
     throw std::runtime_error("g_n has wrong size.");
   }
 
-  // seg.A = Eigen::MatrixXd::Zero(n_rows, n_cols);
-  // seg.b_fix = Eigen::VectorXd::Zero(n_rows);
-  // seg.b_t   = Eigen::VectorXd::Zero(n_rows);
-
   for (int k = 0; k < n_vertices; ++k) {
     const Eigen::VectorXd& n = vertices_j[k];
     if (n.size() != kSpaceDim) {
@@ -597,56 +583,20 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
     const Eigen::VectorXd r = hcpwa::util::radiusR(Qr, qr, n);
     double kappa_fix = hcpwa::util::kappaFixed(g_n, g0, n, dt);
 
-    // Rows
-    Eigen::RowVectorXd lower_bound_dense_row
-        = Eigen::RowVectorXd::Zero(n_cols);  // corresponds to z <= min_w F
-    Eigen::RowVectorXd upper_bound_dense_row
-        = Eigen::RowVectorXd::Zero(n_cols);  // corresponds to max_w F <= 0
+    Eigen::RowVectorXd feas_row = Eigen::RowVectorXd::Zero(n_cols);
+    feas_row.block(0, 0, 1, kSpaceDim) = p.transpose();
+    feas_row(kSpaceDim) = -1.0;
+    feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
 
-    // ---- (MIN_w) row:  -p^T V + 1*v + 1*z + dt*r^T s <= +kappa
-    // V block
-    // seg.A.block(row_min, 0, 1, m) = (-p.transpose());
-    lower_bound_dense_row.block(0, 0, 1, kSpaceDim) = (-p.transpose());
-    // v, z blocks
-    // seg.A(row_min, m)     = 1.0;    // v
-    // seg.A(row_min, m + 1) = 1.0;    // z
-    lower_bound_dense_row(kSpaceDim) = 1.0;
-    lower_bound_dense_row(kSpaceDim + 1) = 1.0;
-    // s block
-    // seg.A.block(row_min, m + 2, 1, m) = (dt * r.transpose());
-    lower_bound_dense_row.block(0, kSpaceDim + 2, 1, kSpaceDim)
-        = (dt * r.transpose());
-
-    // RHS split
-    // seg.b_fix(row_min) = kappa_fix;
-    if (std::abs(kappa_fix) > kEps) {
-      b_fixed.push_back(kappa_fix);
-    } else {
-      b_fixed.push_back(0);
-    }
-    // seg.b_t(row_min)   =  kappa_t;
-    hcpwa::util::csrAppendRow(starts, cols, values, lower_bound_dense_row,
-                              kEps);
-
-    // ---- (MAX_w) row:  +p^T V - 1*v + 0*z + dt*r^T s <= -kappa
-    // seg.A.block(row_max, 0, 1, m) = (p.transpose());
-    upper_bound_dense_row.block(0, 0, 1, kSpaceDim) = (p.transpose());
-    // seg.A(row_max, m)     = -1.0;   // v
-    upper_bound_dense_row(kSpaceDim) = -1.0;
-    // seg.A(row_max, m + 1) =  0.0;   // z
-    // seg.A.block(row_max, m + 2, 1, m) = (dt * r.transpose());
-    upper_bound_dense_row.block(0, kSpaceDim + 2, 1, kSpaceDim)
-        = (dt * r.transpose());
-
-    // seg.b_fix(row_max) = -kappa_fix;
     if (std::abs(kappa_fix) > kEps) {
       b_fixed.push_back(-kappa_fix);
     } else {
       b_fixed.push_back(0);
     }
-    // seg.b_t(row_max)   = -kappa_t;
-    hcpwa::util::csrAppendRow(starts, cols, values, upper_bound_dense_row,
-                              kEps);
+    hcpwa::util::csrAppendRow(starts, cols, values, feas_row, kEps);
+
+    obj_p_accum += p;
+    ++vertex_count;
   }
 }
 
@@ -671,35 +621,44 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
   std::vector<int> col_index;
   std::vector<double> value;
   std::vector<double> row_upper;
+  Eigen::VectorXd obj_p_accum = Eigen::VectorXd::Zero(kSpaceDim);
+  int vertex_count = 0;
   // n_areas = 1000000;
 
   for (int j = 0; j < n_areas; ++j) {
     buildLPSegmentForJ(a_j_matrs[j], f_j_vecs[j], q_c_j_matrs[j], q_c_j_vecs[j],
                        q_r_j_matrs[j], q_r_j_vecs[j], g_j_vecs[j], g_j_scals[j],
                        intersection_points_phase[j], t_delta_, starts,
-                       col_index, value, row_upper);
+                       col_index, value, row_upper, obj_p_accum, vertex_count);
   }
-  // s >= [V, v] and s >= -[V, v]
-  // [V, v, z, s], where s \in R^kSpaceDim
+  // s >= V and s >= -V
+  // [V, v, s], where s \in R^kSpaceDim
   for (int i = 0; i < kSpaceDim; i++) {
     Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(kLPCols);
     row(i) = 1;
-    row(i + kSpaceDim + 2) = -1;
+    row(i + kSpaceDim + 1) = -1;
     hcpwa::util::csrAppendRow(starts, col_index, value, row);
   }
   for (int i = 0; i < kSpaceDim; i++) {
     Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(kLPCols);
     row(i) = -1;
-    row(i + kSpaceDim + 2) = -1;
+    row(i + kSpaceDim + 1) = -1;
     hcpwa::util::csrAppendRow(starts, col_index, value, row);
   }
   for (int i = 0; i < 2 * kSpaceDim; i++) {
     row_upper.push_back(0);
   }
 
-  // z -> max, [V, v, z, s]
   Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(kLPCols);
-  c_vec(kSpaceDim + 1) = 1;
+  c_vec.head(kSpaceDim) = -obj_p_accum.transpose();
+  c_vec(kSpaceDim) = static_cast<double>(vertex_count);
+  // TODO(experiment): Temporarily disable s-regularization in the objective
+  // to test whether it is unnecessary.
+  // === s-pinning penalty (Option 1, see plan): pin s_i = |V_i| ===
+  c_vec.segment(kSpaceDim + 1, kSpaceDim)
+      = Eigen::RowVectorXd::Constant(kSpaceDim, kSPinWeight);
+  // ==============================================================
+
   return std::make_tuple(std::move(starts), std::move(col_index),
                          std::move(value), std::move(row_upper),
                          std::move(c_vec));
@@ -938,10 +897,8 @@ GlobalAffineApproximator::initializeHighs(int phase) {
   // Logging and etc
   highs->setOptionValue("log_to_console", highs_verbose_);
 
-  highs->changeObjectiveSense(
-      ObjSense::kMaximize);  // Must be maximization because need to maximize
-                             // the lower bound of the non-positive value (z)
-                             // for Chebyshev approximation.
+  // L1-residual inner LP objective is minimized.
+  highs->changeObjectiveSense(ObjSense::kMinimize);
 
   const double inf = highs->getInfinity();
   std::vector<double> col_lower(n, -inf);
@@ -970,12 +927,11 @@ GlobalAffineApproximator::initializeHighs(int phase) {
     throw std::runtime_error("InitializeHighs: highs.addRows failed.");
   }
 
-  // Warm-start the main LP with x0 = ones, except z = -1.
-  // Layout: [V(kSpaceDim), v, z, s(kSpaceDim)].
+  // Warm-start the main LP with x0 = ones.
+  // Layout: [V(kSpaceDim), v, s(kSpaceDim)].
   HighsSolution initial_solution;
   initial_solution.value_valid = true;
   initial_solution.col_value.assign(n, 1.0);
-  initial_solution.col_value[kSpaceDim + 1] = -1.0;
   st = highs->setSolution(initial_solution);
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("InitializeHighs: highs.setSolution failed.");
@@ -1008,12 +964,7 @@ void GlobalAffineApproximator::updateHighsRhsUpperBounds(
         b_upd += v_prev_vec[i] * vertex(i);
       }
       b_upd += v_prev_vec[kSpaceDim];
-      new_row_upper[j] = row_upper[j] + b_upd;  // +kappa
-      if (std::abs(new_row_upper[j]) <= kEps) {
-        new_row_upper[j] = 0.0;
-      }
-      j++;
-      new_row_upper[j] = row_upper[j] - b_upd;  // -kappa
+      new_row_upper[j] = row_upper[j] - b_upd;
       if (std::abs(new_row_upper[j]) <= kEps) {
         new_row_upper[j] = 0.0;
       }
@@ -1057,18 +1008,9 @@ std::vector<double> GlobalAffineApproximator::solveLp(int solver_index) {
   std::vector<double> result(solution.col_value.begin(),
                              solution.col_value.end());
 
-  // x_next = [V, v, z, s], extract only v_next = [V, v]
+  // x_next = [V, v, s], extract only v_next = [V, v]
   std::vector<double> v_next(kVDeltaDim);
   std::copy(result.begin(), result.begin() + kVDeltaDim, v_next.begin());
-  double z_next = result[kVDeltaDim];
-
-  // z is a lower bound of the non-positive value, so if z apper to be
-  // non-negative, it means that something went wrong.
-  if (z_next > -kEps) {
-    throw std::runtime_error(
-        "solveLp: z_next is non-negative: " + std::to_string(z_next)
-        + ", should be less than -kEps: " + std::to_string(-kEps));
-  }
 
   return v_next;
 }

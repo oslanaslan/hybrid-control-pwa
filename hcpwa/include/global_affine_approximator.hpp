@@ -28,8 +28,11 @@ extern const std::vector<int> kOutIds;
 extern const int kPhases;
 constexpr int kSpaceDim = 8;
 constexpr int kVDeltaDim = kSpaceDim + 1;            // [V, v]
-constexpr int kLPCols = kVDeltaDim + 1 + kSpaceDim;  // [V, v, z, s]
+constexpr int kLPCols = kVDeltaDim + kSpaceDim;  // [V, v, s]
 constexpr double kEps = 1e-5;
+// Tiny positive cost on s to pin s_i = |V_i| in the L1-residual objective
+// (s no longer appears in the residual objective; keep << |c_vec| entries).
+constexpr double kSPinWeight = 1e-6;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 
@@ -160,7 +163,8 @@ class GlobalAffineApproximator {
         const Eigen::VectorXd& g_n, double g0,
         const std::vector<Eigen::VectorXd>& vertices_j, double dt,
         std::vector<int>& starts, std::vector<int>& cols,
-        std::vector<double>& values, std::vector<double>& b_fixed);
+        std::vector<double>& values, std::vector<double>& b_fixed,
+        Eigen::VectorXd& obj_p_accum, int& vertex_count);
 };
 
 }  // namespace global_affine_approximator

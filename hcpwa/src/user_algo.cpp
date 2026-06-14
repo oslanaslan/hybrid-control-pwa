@@ -5,6 +5,7 @@
 #include <format>
 #include <mutex>
 #include <ostream>
+#include <stdexcept>
 #include <symbolic.hpp>
 #include <morph.hpp>
 #include <thread>
@@ -839,6 +840,127 @@ PhaseIntersectionResult compute_intersection_points(
   return result;
 }
 
+CommonRefinementResult compute_common_refinement_area_vertices(
+    const std::vector<hcpwa::LineSet<8>>& prisms31,
+    const std::vector<hcpwa::LineSet<8>>& prisms36,
+    const std::vector<hcpwa::LineSet<8>>& prisms24,
+    const std::vector<hcpwa::LineSet<8>>& prisms27,
+    const std::vector<hcpwa::LineSet<8>>& prisms58,
+    const std::vector<hcpwa::LineSet<8>>& prisms51,
+    const std::vector<hcpwa::LineSet<8>>& prisms57,
+    const std::vector<hcpwa::LineSet<8>>& prisms84,
+    const std::vector<hcpwa::LineSet<8>>& prisms86,
+    const std::vector<hcpwa::LineSet<8>>& prisms23,
+    const std::vector<std::vector<size_t>>& phase0_area_prism_indices,
+    const std::vector<std::vector<size_t>>& phase1_area_prism_indices,
+    hcpwa::Float N, bool verbose) {
+  hcpwa::AABB<8> aabb
+      = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
+  const auto aabb_bounds = hcpwa::AABBBounds(aabb);
+
+  auto require_tuple = [](const std::vector<size_t>& tuple, int phase,
+                          size_t area_id) {
+    if (tuple.size() != 5) {
+      throw std::runtime_error(std::format(
+          "compute_common_refinement_area_vertices: phase {} area {} has {} "
+          "prism ids, expected 5",
+          phase, area_id, tuple.size()));
+    }
+  };
+
+  auto require_index = [](size_t idx, size_t size, int phase, size_t area_id,
+                          int layer_id, const char* prism_name) {
+    if (idx >= size) {
+      throw std::runtime_error(std::format(
+          "compute_common_refinement_area_vertices: phase {} area {} layer {} "
+          "uses {} index {} but only {} prisms exist",
+          phase, area_id, layer_id, prism_name, idx, size));
+    }
+  };
+
+  auto append_prism = [](hcpwa::LineSet<8>& dst,
+                         const hcpwa::LineSet<8>& src) {
+    dst.insert(dst.end(), src.begin(), src.end());
+  };
+
+  CommonRefinementResult result;
+
+  for (size_t phase0_area_id = 0;
+       phase0_area_id < phase0_area_prism_indices.size(); ++phase0_area_id) {
+    const auto& phase0_tuple = phase0_area_prism_indices[phase0_area_id];
+    require_tuple(phase0_tuple, 0, phase0_area_id);
+
+    for (size_t phase1_area_id = 0;
+         phase1_area_id < phase1_area_prism_indices.size(); ++phase1_area_id) {
+      const auto& phase1_tuple = phase1_area_prism_indices[phase1_area_id];
+      require_tuple(phase1_tuple, 1, phase1_area_id);
+
+      // These tuple slots are the critical indexing contract between the area
+      // builder and the barycentric layer order. Keep them named here so a
+      // future change cannot silently swap, for example, prism 36 and prism 24.
+      const std::array<size_t, 5> phase0_prism_ids = {
+          phase0_tuple[0], phase0_tuple[1], phase0_tuple[2], phase0_tuple[3],
+          phase0_tuple[4]};
+      const std::array<size_t, 5> phase1_prism_ids = {
+          phase1_tuple[0], phase1_tuple[1], phase1_tuple[2], phase1_tuple[3],
+          phase1_tuple[4]};
+
+      require_index(phase0_prism_ids[0], prisms31.size(), 0, phase0_area_id, 0,
+                    "31");
+      require_index(phase0_prism_ids[1], prisms36.size(), 0, phase0_area_id, 1,
+                    "36");
+      require_index(phase0_prism_ids[2], prisms24.size(), 0, phase0_area_id, 2,
+                    "24");
+      require_index(phase0_prism_ids[3], prisms27.size(), 0, phase0_area_id, 3,
+                    "27");
+      require_index(phase0_prism_ids[4], prisms58.size(), 0, phase0_area_id, 4,
+                    "58");
+      require_index(phase1_prism_ids[0], prisms51.size(), 1, phase1_area_id, 0,
+                    "51");
+      require_index(phase1_prism_ids[1], prisms57.size(), 1, phase1_area_id, 1,
+                    "57");
+      require_index(phase1_prism_ids[2], prisms84.size(), 1, phase1_area_id, 2,
+                    "84");
+      require_index(phase1_prism_ids[3], prisms86.size(), 1, phase1_area_id, 3,
+                    "86");
+      require_index(phase1_prism_ids[4], prisms23.size(), 1, phase1_area_id, 4,
+                    "23");
+
+      hcpwa::LineSet<8> combined_prisms = aabb_bounds;
+      append_prism(combined_prisms, prisms31[phase0_prism_ids[0]]);
+      append_prism(combined_prisms, prisms36[phase0_prism_ids[1]]);
+      append_prism(combined_prisms, prisms24[phase0_prism_ids[2]]);
+      append_prism(combined_prisms, prisms27[phase0_prism_ids[3]]);
+      append_prism(combined_prisms, prisms58[phase0_prism_ids[4]]);
+      append_prism(combined_prisms, prisms51[phase1_prism_ids[0]]);
+      append_prism(combined_prisms, prisms57[phase1_prism_ids[1]]);
+      append_prism(combined_prisms, prisms84[phase1_prism_ids[2]]);
+      append_prism(combined_prisms, prisms86[phase1_prism_ids[3]]);
+      append_prism(combined_prisms, prisms23[phase1_prism_ids[4]]);
+
+      std::vector<hcpwa::Vec<8>> vertices
+          = hcpwa::LinesToPoints<8>(combined_prisms);
+      if (vertices.empty()) {
+        continue;
+      }
+
+      CommonRefinementArea area;
+      area.phase0_area_id = phase0_area_id;
+      area.phase1_area_id = phase1_area_id;
+      area.phase0_prism_indices = phase0_prism_ids;
+      area.phase1_prism_indices = phase1_prism_ids;
+      area.vertices = std::move(vertices);
+      result.areas.push_back(std::move(area));
+    }
+  }
+
+  if (verbose) {
+    std::cout << "Common refinement areas count: " << result.areas.size()
+              << '\n';
+  }
+  return result;
+}
+
 PhaseIntersectionResult compute_intersection_points(
   const std::vector<hcpwa::LineSet<8>>& prisms31,
   const std::vector<hcpwa::LineSet<8>>& prisms36,
@@ -1083,6 +1205,17 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
   auto& intersection_prism_indices_phase1
       = intersection_result.intersection_prism_indices_phase1;
 
+  // The border-condition LP needs vertices of the common refinement between the
+  // two phase partitions, not just vertices of each phase partition separately.
+  // Reuse the exact phase-area prism tuples above so the common-refinement cells
+  // inherit the same [31,36,24,27,58] and [51,57,84,86,23] indexing contracts.
+  CommonRefinementResult common_refinement
+      = compute_common_refinement_area_vertices(
+          prisms31, prisms36, prisms24, prisms27, prisms58, prisms51, prisms57,
+          prisms84, prisms86, prisms23, intersection_prism_indices_phase0,
+          intersection_prism_indices_phase1, static_cast<hcpwa::Float>(N),
+          verbose);
+
   TriangleAreasVerticesResult result;
   // Phase 0
   result.triangles31 = polygons31;
@@ -1101,6 +1234,7 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
   result.intersection_prism_indices_phase0 = intersection_prism_indices_phase0;
   result.intersection_points_phase1 = intersection_points_phase1;
   result.intersection_prism_indices_phase1 = intersection_prism_indices_phase1;
+  result.common_refinement = std::move(common_refinement);
 
   if (verbose) {
     std::cout << "result.triangles31.size(): " << result.triangles31.size()
@@ -1131,6 +1265,8 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
               << result.intersection_points_phase1.size() << '\n';
     std::cout << "result.intersection_prism_indices_phase1.size(): "
               << result.intersection_prism_indices_phase1.size() << '\n';
+    std::cout << "result.common_refinement.areas.size(): "
+              << result.common_refinement.areas.size() << '\n';
   }
 
   return result;

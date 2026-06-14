@@ -1,8 +1,8 @@
 cmake -B build \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCUPDLP_GPU=ON \
-    -DCUPDLP_FIND_CUDA=ON
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCUPDLP_GPU=OFF \
+    -DCUPDLP_FIND_CUDA=OFF
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to configure CMake"

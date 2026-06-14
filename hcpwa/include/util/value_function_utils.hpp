@@ -111,6 +111,23 @@ class ValueFunction {
         }
     }
 
+    bool contains(int phase, int r, int theta_idx, int theta_end_idx) const {
+        std::lock_guard<std::mutex> lock(mut_);
+        auto phase_it = data_.find(phase);
+        if (phase_it == data_.end()) {
+            return false;
+        }
+        auto r_it = phase_it->second.find(r);
+        if (r_it == phase_it->second.end()) {
+            return false;
+        }
+        auto theta_it = r_it->second.find(theta_idx);
+        if (theta_it == r_it->second.end()) {
+            return false;
+        }
+        return theta_it->second.find(theta_end_idx) != theta_it->second.end();
+    }
+
     void dumpToJson(const std::string& filepath) const {
         std::lock_guard<std::mutex> lock(mut_);
         std::ostringstream out;

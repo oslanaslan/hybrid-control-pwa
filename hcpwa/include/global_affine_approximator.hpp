@@ -36,6 +36,8 @@ constexpr double kSPinWeight = 1e-6;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 
+enum class ApproximationMode { Upper, Lower };
+
 struct SystemParams {
     double N;
     double F;
@@ -73,6 +75,7 @@ class GlobalAffineApproximator {
     std::vector<int> t_index_;
 
     bool highs_verbose_ = false;
+    ApproximationMode approximation_mode_ = ApproximationMode::Upper;
 
     ValueFunction value_function_;
     std::vector<Eigen::VectorXd> cube_angle_vertices_;
@@ -101,7 +104,8 @@ class GlobalAffineApproximator {
     GlobalAffineApproximator(double t_max, int t_split_count,
                              double tau_min, double tau_max,
                              const SystemParams& system_params,
-                             bool highs_verbose = false);
+                             bool highs_verbose = false,
+                             ApproximationMode mode = ApproximationMode::Upper);
 
     double getBetaParamForAxis(int i, int j) const;
 
@@ -135,6 +139,11 @@ class GlobalAffineApproximator {
                                   int phase, const Eigen::VectorXd& n);
 
     double getMaxBorderFuncValuesAtN(int theta_idx,
+                                     const std::vector<int>& theta_end_ids,
+                                     int max_switches, int phase,
+                                     const Eigen::VectorXd& n);
+
+    double getMinBorderFuncValuesAtN(int theta_idx,
                                      const std::vector<int>& theta_end_ids,
                                      int max_switches, int phase,
                                      const Eigen::VectorXd& n);

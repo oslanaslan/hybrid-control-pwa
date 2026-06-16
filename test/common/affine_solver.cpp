@@ -59,8 +59,11 @@ create_linear_approximator() {
   constexpr int t_split_count = 1000;
   // constexpr int max_switches = 5;
 
+  global_affine_approximator::ApproximationMode approximation_mode = global_affine_approximator::ApproximationMode::Lower;
+  bool highs_verbose = false;
+
   return global_affine_approximator::GlobalAffineApproximator(
-      t_max, t_split_count, tau_min, tau_max, system_params, false);
+      t_max, t_split_count, tau_min, tau_max, system_params, approximation_mode, highs_verbose);
 }
 
 TEST(common, affine_solver) {

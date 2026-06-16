@@ -77,13 +77,15 @@ const int kPhases = 2;
 
 GlobalAffineApproximator::GlobalAffineApproximator(
     double t_max, int t_split_count, double tau_min, double tau_max,
-    const SystemParams& system_params, bool highs_verbose)
+    const SystemParams& system_params, bool highs_verbose,
+    ApproximationMode mode)
     : t_max_(t_max),
       t_split_count_(t_split_count),
       tau_min_(tau_min),
       tau_max_(tau_max),
       system_params_(system_params),
-      highs_verbose_(highs_verbose) {
+      highs_verbose_(highs_verbose),
+      approximation_mode_(mode) {
   if (t_split_count < 1) {
     throw std::invalid_argument(
         "t_split_count must be at least 1 in GlobalAffineApproximator "
@@ -124,9 +126,12 @@ GlobalAffineApproximator::GlobalAffineApproximator(
 void GlobalAffineApproximator::dumpInitParamsToJson(
     const std::string& filepath) const {
   const SystemParams& p = system_params_;
+  const char* mode_str =
+      approximation_mode_ == ApproximationMode::Upper ? "upper" : "lower";
   std::ostringstream out;
   out << "{\n"
       << "  \"t_max\": " << t_max_ << ",\n"
+      << "  \"approximation_mode\": \"" << mode_str << "\",\n"
       << "  \"t_split_count\": " << t_split_count_ << ",\n"
       << "  \"max_switches\": " << max_switches_ << ",\n"
       << "  \"tau_min\": " << tau_min_ << ",\n"
@@ -583,13 +588,20 @@ void GlobalAffineApproximator::buildLPSegmentForJ(
     const Eigen::VectorXd r = hcpwa::util::radiusR(Qr, qr, n);
     double kappa_fix = hcpwa::util::kappaFixed(g_n, g0, n, dt);
 
+    const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
     Eigen::RowVectorXd feas_row = Eigen::RowVectorXd::Zero(n_cols);
-    feas_row.block(0, 0, 1, kSpaceDim) = p.transpose();
-    feas_row(kSpaceDim) = -1.0;
-    feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
+    if (is_upper) {
+      feas_row.block(0, 0, 1, kSpaceDim) = p.transpose();
+      feas_row(kSpaceDim) = -1.0;
+      feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
+    } else {
+      feas_row.block(0, 0, 1, kSpaceDim) = -p.transpose();
+      feas_row(kSpaceDim) = 1.0;
+      feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
+    }
 
     if (std::abs(kappa_fix) > kEps) {
-      b_fixed.push_back(-kappa_fix);
+      b_fixed.push_back(is_upper ? -kappa_fix : kappa_fix);
     } else {
       b_fixed.push_back(0);
     }
@@ -650,8 +662,14 @@ GlobalAffineApproximator::prepareLpMatrices(int phase) {
   }
 
   Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(kLPCols);
-  c_vec.head(kSpaceDim) = -obj_p_accum.transpose();
-  c_vec(kSpaceDim) = static_cast<double>(vertex_count);
+  const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
+  if (is_upper) {
+    c_vec.head(kSpaceDim) = -obj_p_accum.transpose();
+    c_vec(kSpaceDim) = static_cast<double>(vertex_count);
+  } else {
+    c_vec.head(kSpaceDim) = obj_p_accum.transpose();
+    c_vec(kSpaceDim) = -static_cast<double>(vertex_count);
+  }
   // TODO(experiment): Temporarily disable s-regularization in the objective
   // to test whether it is unnecessary.
   // === s-pinning penalty (Option 1, see plan): pin s_i = |V_i| ===
@@ -723,6 +741,28 @@ double GlobalAffineApproximator::getMaxBorderFuncValuesAtN(
   return max_val;
 }
 
+double GlobalAffineApproximator::getMinBorderFuncValuesAtN(
+    int theta_idx, const std::vector<int>& theta_end_ids, int max_switches,
+    int phase, const Eigen::VectorXd& n) {
+  double min_val = std::numeric_limits<double>::infinity();
+  for (int theta_end_idx : theta_end_ids) {
+    for (int r = 0; r < max_switches; ++r) {
+      double val
+          = getBorderFuncValuesAtN(r, theta_idx, theta_end_idx, phase, n);
+      min_val = std::min(min_val, val);
+    }
+  }
+
+  if (!std::isfinite(min_val)) {
+    throw std::runtime_error(
+        std::format("getMinBorderFuncValuesAtN: no finite border value for "
+                    "theta_idx: {}, max_switches: {}, phase: {}",
+                    theta_idx, max_switches, phase));
+  }
+
+  return min_val;
+}
+
 std::vector<double> GlobalAffineApproximator::getBorderConditions(
     int switch_phase, int theta_idx, double theta, int switch_cnt) {
   // If switch_cnt == 0, return zeros
@@ -743,9 +783,11 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
     throw std::runtime_error("getBorderConditions: No theta range found");
   }
 
+  const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
+
   // Initialize c_vec as zeros
   std::vector<double> c_vec(kVDeltaDim + 1, 0.0);
-  c_vec[kVDeltaDim] = 1.0;  // z
+  c_vec[kVDeltaDim] = is_upper ? 1.0 : -1.0;  // min z (upper) or min(-z) (lower)
 
   // Build a_matr and b_vec
   std::vector<std::vector<double>> a_matr_lst;
@@ -755,8 +797,13 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
   const double inf = highs.getInfinity();
 
   for (const auto& vertex : this->cube_angle_vertices_) {
-    double f_scal = getMaxBorderFuncValuesAtN(theta_idx, theta_range_ids,
-                                              switch_cnt, switch_phase, vertex);
+    double f_scal = is_upper
+                        ? getMaxBorderFuncValuesAtN(theta_idx, theta_range_ids,
+                                                    switch_cnt, switch_phase,
+                                                    vertex)
+                        : getMinBorderFuncValuesAtN(theta_idx, theta_range_ids,
+                                                    switch_cnt, switch_phase,
+                                                    vertex);
     if (!std::isfinite(f_scal)) {
       logger_->error(
           "getBorderConditions: non-finite f_scal for switch_phase={}, "
@@ -765,25 +812,45 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
       throw std::runtime_error("getBorderConditions: non-finite f_scal");
     }
 
-    // Build row: [vertex, 1, 0] for Ax >= b
-    std::vector<double> row_lower(kVDeltaDim + 1);
-    // Build row: [vertex, 1, 0] for z >= Ax -> Ax - z <= 0
-    std::vector<double> row_upper(kVDeltaDim + 1);
-    for (int i = 0; i < kSpaceDim; ++i) {
-      row_lower[i] = vertex(i);  // V
-      row_upper[i] = vertex(i);  // V
-    }
-    row_lower[kVDeltaDim - 1] = 1.0;  // v
-    row_lower[kVDeltaDim] = 0.0;      // z
-    row_upper[kVDeltaDim - 1] = 1.0;  // v
-    row_upper[kVDeltaDim] = -1.0;     // z
+    if (is_upper) {
+      // V^T n + v >= f_max; V^T n + v <= z
+      std::vector<double> row_lower(kVDeltaDim + 1);
+      std::vector<double> row_upper(kVDeltaDim + 1);
+      for (int i = 0; i < kSpaceDim; ++i) {
+        row_lower[i] = vertex(i);
+        row_upper[i] = vertex(i);
+      }
+      row_lower[kVDeltaDim - 1] = 1.0;
+      row_lower[kVDeltaDim] = 0.0;
+      row_upper[kVDeltaDim - 1] = 1.0;
+      row_upper[kVDeltaDim] = -1.0;
 
-    b_vec_lower_lst.push_back(f_scal);
-    b_vec_upper_lst.push_back(inf);
-    b_vec_lower_lst.push_back(-inf);
-    b_vec_upper_lst.push_back(0);
-    a_matr_lst.push_back(row_lower);
-    a_matr_lst.push_back(row_upper);
+      b_vec_lower_lst.push_back(f_scal);
+      b_vec_upper_lst.push_back(inf);
+      b_vec_lower_lst.push_back(-inf);
+      b_vec_upper_lst.push_back(0);
+      a_matr_lst.push_back(row_lower);
+      a_matr_lst.push_back(row_upper);
+    } else {
+      // V^T n + v <= f_min; z <= V^T n + v
+      std::vector<double> row_upper_bound(kVDeltaDim + 1);
+      std::vector<double> row_floor(kVDeltaDim + 1);
+      for (int i = 0; i < kSpaceDim; ++i) {
+        row_upper_bound[i] = vertex(i);
+        row_floor[i] = -vertex(i);
+      }
+      row_upper_bound[kVDeltaDim - 1] = 1.0;
+      row_upper_bound[kVDeltaDim] = 0.0;
+      row_floor[kVDeltaDim - 1] = -1.0;
+      row_floor[kVDeltaDim] = 1.0;
+
+      b_vec_lower_lst.push_back(-inf);
+      b_vec_upper_lst.push_back(f_scal);
+      b_vec_lower_lst.push_back(-inf);
+      b_vec_upper_lst.push_back(0);
+      a_matr_lst.push_back(row_upper_bound);
+      a_matr_lst.push_back(row_floor);
+    }
   }
 
   // Convert a_matr_lst to a single matrix (for Highs sparse format)
@@ -956,6 +1023,7 @@ void GlobalAffineApproximator::updateHighsRhsUpperBounds(
   std::vector<int> row_ids(row_upper.size());
   std::iota(row_ids.begin(), row_ids.end(), 0);
 
+  const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
   int j = 0;
   for (auto& area : intersection_points_phase) {
     for (auto& vertex : area) {
@@ -964,7 +1032,11 @@ void GlobalAffineApproximator::updateHighsRhsUpperBounds(
         b_upd += v_prev_vec[i] * vertex(i);
       }
       b_upd += v_prev_vec[kSpaceDim];
-      new_row_upper[j] = row_upper[j] - b_upd;
+      if (is_upper) {
+        new_row_upper[j] = row_upper[j] - b_upd;
+      } else {
+        new_row_upper[j] = row_upper[j] + b_upd;
+      }
       if (std::abs(new_row_upper[j]) <= kEps) {
         new_row_upper[j] = 0.0;
       }

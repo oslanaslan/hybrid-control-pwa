@@ -785,15 +785,27 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
 
   const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
 
-  // Initialize c_vec as zeros
-  std::vector<double> c_vec(kVDeltaDim + 1, 0.0);
-  c_vec[kVDeltaDim] = is_upper ? 1.0 : -1.0;  // min z (upper) or min(-z) (lower)
+  Eigen::VectorXd n_bar = Eigen::VectorXd::Zero(kSpaceDim);
+  for (const auto& vertex : cube_angle_vertices_) {
+    n_bar += vertex;
+  }
+  const int n_corner = static_cast<int>(cube_angle_vertices_.size());
+  if (n_corner == 0) {
+    throw std::runtime_error("getBorderConditions: cube_angle_vertices_ is empty");
+  }
 
-  // Build a_matr and b_vec
+  std::vector<double> c_vec(kVDeltaDim, 0.0);
+  for (int i = 0; i < kSpaceDim; ++i) {
+    c_vec[i] = is_upper ? n_bar(i) : -n_bar(i);
+  }
+  c_vec[kSpaceDim] = is_upper ? static_cast<double>(n_corner)
+                              : -static_cast<double>(n_corner);
+
   std::vector<std::vector<double>> a_matr_lst;
   std::vector<double> b_vec_lower_lst;
   std::vector<double> b_vec_upper_lst;
-  // auto inf = std::numeric_limits<double>::infinity();
+  std::vector<double> f_scals;
+  f_scals.reserve(n_corner);
   const double inf = highs.getInfinity();
 
   for (const auto& vertex : this->cube_angle_vertices_) {
@@ -811,51 +823,31 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
           switch_phase, theta_idx, theta, switch_cnt, vertex.norm());
       throw std::runtime_error("getBorderConditions: non-finite f_scal");
     }
+    f_scals.push_back(f_scal);
 
+    std::vector<double> row(kVDeltaDim);
     if (is_upper) {
-      // V^T n + v >= f_max; V^T n + v <= z
-      std::vector<double> row_lower(kVDeltaDim + 1);
-      std::vector<double> row_upper(kVDeltaDim + 1);
+      // [-n^T, -1] x <= -f_max  <=>  V^T n + v >= f_max
       for (int i = 0; i < kSpaceDim; ++i) {
-        row_lower[i] = vertex(i);
-        row_upper[i] = vertex(i);
+        row[i] = -vertex(i);
       }
-      row_lower[kVDeltaDim - 1] = 1.0;
-      row_lower[kVDeltaDim] = 0.0;
-      row_upper[kVDeltaDim - 1] = 1.0;
-      row_upper[kVDeltaDim] = -1.0;
-
-      b_vec_lower_lst.push_back(f_scal);
-      b_vec_upper_lst.push_back(inf);
+      row[kSpaceDim] = -1.0;
       b_vec_lower_lst.push_back(-inf);
-      b_vec_upper_lst.push_back(0);
-      a_matr_lst.push_back(row_lower);
-      a_matr_lst.push_back(row_upper);
+      b_vec_upper_lst.push_back(-f_scal);
     } else {
-      // V^T n + v <= f_min; z <= V^T n + v
-      std::vector<double> row_upper_bound(kVDeltaDim + 1);
-      std::vector<double> row_floor(kVDeltaDim + 1);
+      // [n^T, 1] x <= f_min  <=>  V^T n + v <= f_min
       for (int i = 0; i < kSpaceDim; ++i) {
-        row_upper_bound[i] = vertex(i);
-        row_floor[i] = -vertex(i);
+        row[i] = vertex(i);
       }
-      row_upper_bound[kVDeltaDim - 1] = 1.0;
-      row_upper_bound[kVDeltaDim] = 0.0;
-      row_floor[kVDeltaDim - 1] = -1.0;
-      row_floor[kVDeltaDim] = 1.0;
-
+      row[kSpaceDim] = 1.0;
       b_vec_lower_lst.push_back(-inf);
       b_vec_upper_lst.push_back(f_scal);
-      b_vec_lower_lst.push_back(-inf);
-      b_vec_upper_lst.push_back(0);
-      a_matr_lst.push_back(row_upper_bound);
-      a_matr_lst.push_back(row_floor);
     }
+    a_matr_lst.push_back(std::move(row));
   }
 
-  // Convert a_matr_lst to a single matrix (for Highs sparse format)
-  const int m = static_cast<int>(a_matr_lst.size());  // 2 * 2^kSpaceDim
-  const int n = static_cast<int>(c_vec.size());       // kSpaceDim + 2
+  const int m = static_cast<int>(a_matr_lst.size());
+  const int n = kVDeltaDim;
 
   // Build sparse matrix representation for Highs
   std::vector<int> starts(m + 1, 0);
@@ -879,6 +871,8 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
   // Set up and solve LP with Highs
   highs.setOptionValue("solver", "simplex");
   highs.setOptionValue("presolve", "on");
+  highs.setOptionValue("simplex_strategy", 2);
+  highs.setOptionValue("pdlp_optimality_tolerance", kHighsPdlpOptimalityTol);
   highs.setOptionValue("log_to_console", highs_verbose_);
   highs.changeObjectiveSense(ObjSense::kMinimize);
   highs.setOptionValue("kkt_tolerance", kHighsSolutionTol);
@@ -931,10 +925,40 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
         + std::to_string(static_cast<int>(highs.getModelStatus())));
   }
 
-  // Extract solution
   const auto& solution = highs.getSolution();
+  if (solution.col_value.size() < static_cast<std::size_t>(kVDeltaDim)) {
+    throw std::runtime_error("getBorderConditions: solution is too short");
+  }
   std::vector<double> result(solution.col_value.begin(),
-                             solution.col_value.end() - 1);  // exclude z
+                             solution.col_value.begin() + kVDeltaDim);
+
+  double min_slack = std::numeric_limits<double>::infinity();
+  double max_slack = -std::numeric_limits<double>::infinity();
+  double sum_slack = 0.0;
+  for (std::size_t corner = 0; corner < cube_angle_vertices_.size(); ++corner) {
+    const auto& vertex = cube_angle_vertices_[corner];
+    double val = 0.0;
+    for (int i = 0; i < kSpaceDim; ++i) {
+      val += result[i] * vertex(i);
+    }
+    val += result[kSpaceDim];
+    const double f_scal = f_scals[corner];
+    const double slack = is_upper ? (val - f_scal) : (f_scal - val);
+    if (slack < -10.0 * kHighsSolutionTol) {
+      throw std::runtime_error(
+          is_upper
+              ? "getBorderConditions: border LP violates majorization constraint"
+              : "getBorderConditions: border LP violates minorization constraint");
+    }
+    min_slack = std::min(min_slack, slack);
+    max_slack = std::max(max_slack, slack);
+    sum_slack += slack;
+  }
+  logger_->info(
+      "Border LP switch_phase={} theta_idx={} switch_cnt={} mode={} "
+      "slack_min={:.4f} slack_max={:.4f} slack_sum={:.4f}",
+      switch_phase, theta_idx, switch_cnt, is_upper ? "upper" : "lower",
+      min_slack, max_slack, sum_slack);
 
   return result;
 }

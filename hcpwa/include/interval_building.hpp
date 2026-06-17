@@ -86,10 +86,10 @@ inline void sortAndUnique(std::vector<int>& ids) {
 
 }  // namespace detail
 
-// Строит структуры только для k = 1..K.
-// Это соответствует слоям, где theta действительно играет роль момента
-// переключения. Для k = 0 в разделе 5 theta фиктивный, поэтому здесь он
-// сознательно не включён.
+// Строит структуры для k = 0..K.
+// Для k = 0: единственный допустимый момент переключения theta = T,
+// допустимые t лежат в [T - tau_max, T].
+// Для k >= 1: theta играет роль момента переключения по разделу 5.
 inline ThetaTIndexLists buildThetaToTIndexLists(
     double T, double tau_min, double tau_max,
     const std::vector<double>& time_grid, int K, double eps = 1e-12) {
@@ -118,7 +118,63 @@ inline ThetaTIndexLists buildThetaToTIndexLists(
   ThetaTIndexLists out;
 
   // =========================
-  // Шаг 1. Цикл по слоям k
+  // Слой k = 0 (ноль переключений, терминал в T)
+  // =========================
+  {
+    constexpr int k = 0;
+    const double t_min_0 = std::max(0.0, T - tau_max);
+    const double t_max_0 = T;
+
+    if (t_max_0 < t_min_0 - eps) {
+      out.original_t_by_k_theta[k] = {};
+      out.expanded_t_by_k_theta[k] = {};
+    } else {
+      const std::vector<int> theta_at_T =
+          collectIndicesInClosedInterval(time_grid, T, T, eps);
+      if (theta_at_T.empty()) {
+        throw std::invalid_argument(
+            "time_grid must contain T for k = 0 layer");
+      }
+      const int theta_T_idx = theta_at_T.back();
+
+      std::vector<int> t_ids =
+          collectIndicesInClosedInterval(time_grid, t_min_0, t_max_0, eps);
+      if (t_ids.empty()) {
+        throw std::invalid_argument(
+            "k = 0 layer: no grid points in [T - tau_max, T]");
+      }
+
+      // run() требует, чтобы последний t в expanded совпадал с theta_idx.
+      if (t_ids.back() != theta_T_idx) {
+        t_ids.push_back(theta_T_idx);
+        sortAndUnique(t_ids);
+      }
+
+      std::vector<int> original_t_ids;
+      original_t_ids.reserve(t_ids.size());
+      for (int t_idx : t_ids) {
+        const double t_value = time_grid[t_idx];
+        const double theta_high = std::min(t_value + tau_max, T);
+        if (T + eps >= t_value && T <= theta_high + eps) {
+          original_t_ids.push_back(t_idx);
+        }
+      }
+
+      std::vector<int> expanded_t_ids = original_t_ids;
+      const double t_right_original = std::min(t_max_0, T);
+      const std::vector<int> extra_ids = collectIndicesInClosedInterval(
+          time_grid, t_right_original, T, eps);
+      expanded_t_ids.insert(expanded_t_ids.end(), extra_ids.begin(),
+                            extra_ids.end());
+      sortAndUnique(expanded_t_ids);
+
+      out.original_t_by_k_theta[k][theta_T_idx] = std::move(original_t_ids);
+      out.expanded_t_by_k_theta[k][theta_T_idx] = std::move(expanded_t_ids);
+    }
+  }
+
+  // =========================
+  // Шаг 1. Цикл по слоям k = 1..K
   // =========================
   for (int k = 1; k <= K; ++k) {
     const double t_min_k = std::max(0.0, T - static_cast<double>(k) * tau_max);

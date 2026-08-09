@@ -12,6 +12,29 @@
 #include "utility.hpp"
 #include <uniqie_pool.hpp>
 
+namespace {
+
+hcpwa::Vec<8> MakeUniformVec8(double value) {
+  hcpwa::Vec<8> v = hcpwa::kZeroVec;
+  for (int d = 0; d < 8; ++d) {
+    v[d] = value;
+  }
+  return v;
+}
+
+hcpwa::LineSet<8> MakeUniformBoxPrism(double min_value, double max_value) {
+  hcpwa::AABB<8> box
+      = {MakeUniformVec8(min_value), MakeUniformVec8(max_value)};
+  return hcpwa::AABBBounds(box);
+}
+
+std::vector<hcpwa::Vec<8>> MakeAreaBoundsVertices(double min_value,
+                                                  double max_value) {
+  return {MakeUniformVec8(min_value), MakeUniformVec8(max_value)};
+}
+
+}  // namespace
+
 TEST(user_algo, compute_triangle_areas_vertices) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
@@ -270,4 +293,94 @@ TEST(user_algo, compute_areas_vertices_exhaustive) {
       = hcpwa::compute_triangle_areas_vertices(
           N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min,
           f5min, f8min, f2max, f3max, f5max, f8max);
+}
+
+TEST(user_algo, common_refinement_box_filter_rejects_non_volume_pairs) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  const auto phase0_near = MakeUniformBoxPrism(0.0, 1.0);
+  const auto phase0_far = MakeUniformBoxPrism(3.0, 4.0);
+  const auto phase1_overlap = MakeUniformBoxPrism(0.5, 1.5);
+  const auto phase1_boundary_touch = MakeUniformBoxPrism(4.0, 5.0);
+
+  const std::vector<hcpwa::LineSet<8>> phase0_layer
+      = {phase0_near, phase0_far};
+  const std::vector<hcpwa::LineSet<8>> phase1_layer
+      = {phase1_overlap, phase1_boundary_touch};
+
+  const std::vector<std::vector<size_t>> phase0_area_prism_indices
+      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
+  const std::vector<std::vector<size_t>> phase1_area_prism_indices
+      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
+  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
+      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(3.0, 4.0)};
+  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
+      = {MakeAreaBoundsVertices(0.5, 1.5), MakeAreaBoundsVertices(4.0, 5.0)};
+
+  hcpwa::CommonRefinementResult result
+      = hcpwa::compute_common_refinement_area_vertices(
+          phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
+          phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
+          phase0_area_prism_indices, phase1_area_prism_indices,
+          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
+          /*verbose=*/false);
+
+  ASSERT_EQ(result.areas.size(), 1U);
+
+  bool saw_overlap_pair = false;
+  for (const auto& area : result.areas) {
+    ASSERT_FALSE(area.vertices.empty());
+    if (area.phase0_area_id == 0 && area.phase1_area_id == 0) {
+      saw_overlap_pair = true;
+    }
+  }
+  EXPECT_TRUE(saw_overlap_pair);
+}
+
+TEST(user_algo, common_refinement_box_filter_is_canonical_and_unique) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  const auto phase0_a = MakeUniformBoxPrism(0.0, 1.0);
+  const auto phase0_b = MakeUniformBoxPrism(0.5, 1.5);
+  const auto phase0_degenerate = MakeUniformBoxPrism(2.0, 2.0);
+  const auto phase1_a = MakeUniformBoxPrism(0.25, 0.75);
+  const auto phase1_b = MakeUniformBoxPrism(0.75, 1.25);
+
+  const std::vector<hcpwa::LineSet<8>> phase0_layer
+      = {phase0_a, phase0_b, phase0_degenerate};
+  const std::vector<hcpwa::LineSet<8>> phase1_layer = {phase1_a, phase1_b};
+
+  const std::vector<std::vector<size_t>> phase0_area_prism_indices
+      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}, {2, 2, 2, 2, 2}};
+  const std::vector<std::vector<size_t>> phase1_area_prism_indices
+      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
+  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
+      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(0.5, 1.5),
+         MakeAreaBoundsVertices(2.0, 2.0)};
+  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
+      = {MakeAreaBoundsVertices(0.25, 0.75), MakeAreaBoundsVertices(0.75, 1.25)};
+
+  hcpwa::CommonRefinementResult result
+      = hcpwa::compute_common_refinement_area_vertices(
+          phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
+          phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
+          phase0_area_prism_indices, phase1_area_prism_indices,
+          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
+          /*verbose=*/false);
+
+  ASSERT_EQ(result.areas.size(), 4U);
+  std::vector<std::pair<size_t, size_t>> pairs;
+  pairs.reserve(result.areas.size());
+  for (const auto& area : result.areas) {
+    ASSERT_FALSE(area.vertices.empty());
+    pairs.emplace_back(area.phase0_area_id, area.phase1_area_id);
+  }
+
+  EXPECT_TRUE(std::is_sorted(pairs.begin(), pairs.end()));
+  EXPECT_EQ(std::unique(pairs.begin(), pairs.end()), pairs.end());
+  EXPECT_EQ(
+      pairs,
+      (std::vector<std::pair<size_t, size_t>>{{0, 0}, {0, 1}, {1, 0}, {1, 1}}));
 }

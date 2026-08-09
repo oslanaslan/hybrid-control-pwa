@@ -50,24 +50,23 @@ create_linear_approximator() {
       b24, b27, f2min, f3min, f5min, f8min, f2max, f3max, f5max, f8max};
 
   // LinearApproximator constructor parameters
-  constexpr double t_max = 300.0;
+  constexpr double t_max = 1200.0;
   // constexpr double tau_min = 0.06;
   // constexpr double tau_max = 0.12;
-  constexpr double tau_min = 60;
-  constexpr double tau_max = 120;
+  constexpr double tau_min = 10;
+  constexpr double tau_max = 50;
   // constexpr double t_max = 1.0;
-  constexpr int t_split_count = 1000;
+  constexpr int t_split_count = 240;
   // constexpr int max_switches = 5;
 
   global_affine_approximator::ApproximationMode approximation_mode = global_affine_approximator::ApproximationMode::Lower;
   bool highs_verbose = false;
-
   return global_affine_approximator::GlobalAffineApproximator(
-      t_max, t_split_count, tau_min, tau_max, system_params, approximation_mode, highs_verbose);
+      t_max, t_split_count, tau_min, tau_max, system_params, highs_verbose, approximation_mode);
 }
 
 TEST(common, affine_solver) {
   auto linear_approximator = create_linear_approximator();
 
-  linear_approximator.run("results", 32);
+  linear_approximator.run("/root/gitlab/hybrid-control-pwa/results", 32);
 }

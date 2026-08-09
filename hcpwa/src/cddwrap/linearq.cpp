@@ -1,5 +1,6 @@
 #include <cddwrap/cdd.hpp>
 #include <cddwrap/lineareq.hpp>
+#include <cstdio>
 #include <string>
 #include <stdexcept>
 #include <utility.hpp>
@@ -32,7 +33,13 @@ matrix<double> GetHullPoints(const matrix<double>& inequalities) {
   //   dd_FreePolyhedra(poly);
   // };
   if (err != dd_NoError) {
-    throw std::runtime_error("error " + std::to_string((int)err));
+    dd_WriteErrorMessages(stderr, err);
+    throw std::runtime_error(
+        "cddwrap::GetHullPoints: dd_DDMatrix2Poly failed with error "
+        + std::to_string(static_cast<int>(err))
+        + " (dd_NumericallyInconsistent is error 16); matrix rows="
+        + std::to_string(inequalities.rows())
+        + ", cols=" + std::to_string(inequalities.cols()));
   }
   bool feasible = (poly->child->CompStatus == dd_AllFound);
 

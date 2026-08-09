@@ -1,8 +1,11 @@
 #include <algo.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <format>
+#include <limits>
 #include <mutex>
 #include <ostream>
 #include <stdexcept>
@@ -678,8 +681,39 @@ PhaseIntersectionResult compute_intersection_points(
                        const hcpwa::LineSet<Dim>& bounds,
                        const std::vector<hcpwa::LineSet<8>>& prisms0,
                        const std::vector<hcpwa::LineSet<8>>& prisms1,
+                       const char* label,
+                       bool verbose,
                        std::vector<std::vector<size_t>>& out_indices,
                        std::vector<std::vector<hcpwa::Vec<Dim>>>& out_points) {
+    const std::size_t total_pairs = prisms0.size() * prisms1.size();
+    std::size_t processed_pairs = 0;
+    std::size_t non_empty_pairs = 0;
+    const auto started_at = std::chrono::steady_clock::now();
+    auto next_progress_at = started_at;
+    auto report_progress = [&](bool force) {
+      if (!verbose) {
+        return;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (!force && now < next_progress_at) {
+        return;
+      }
+      const double percent
+          = total_pairs == 0
+                ? 100.0
+                : 100.0 * static_cast<double>(processed_pairs)
+                      / static_cast<double>(total_pairs);
+      const double elapsed_seconds
+          = std::chrono::duration<double>(now - started_at).count();
+      std::cerr << std::format(
+          "Intersection {} progress: {:.1f}% ({}/{} pairs), non_empty={}, "
+          "elapsed={:.1f}s\n",
+          label, percent, processed_pairs, total_pairs, non_empty_pairs,
+          elapsed_seconds);
+      std::cerr.flush();
+      next_progress_at = now + std::chrono::seconds(5);
+    };
+    report_progress(true);
     for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
       for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
         hcpwa::LineSet<Dim> concatenated_prisms = bounds;
@@ -692,13 +726,19 @@ PhaseIntersectionResult compute_intersection_points(
         }
         auto intersection = hcpwa::LinesToPoints<Dim>(concatenated_prisms);
         if (intersection.size() > 0) {
+          ++non_empty_pairs;
           out_points.push_back(intersection);
           // Store the indices of the prisms that form the intersection
           std::vector<size_t> prism_indices = {idx0, idx1};
           out_indices.push_back(prism_indices);
         }
+        ++processed_pairs;
+        if (processed_pairs % 10000 == 0) {
+          report_progress(false);
+        }
       }
     }
+    report_progress(true);
   };
 
   if (verbose) {
@@ -710,22 +750,22 @@ PhaseIntersectionResult compute_intersection_points(
 
   std::vector<std::vector<size_t>> intersection_prism_indices_136;
   std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_136;
-  computend({0, 2, 5}, aabb3d_bounds, prisms31, prisms36,
+  computend({0, 2, 5}, aabb3d_bounds, prisms31, prisms36, "136", verbose,
             intersection_prism_indices_136, intersection_points_136);
 
   std::vector<std::vector<size_t>> intersection_prism_indices_247;
   std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_247;
-  computend({1, 3, 6}, aabb3d_bounds, prisms24, prisms27,
+  computend({1, 3, 6}, aabb3d_bounds, prisms24, prisms27, "247", verbose,
             intersection_prism_indices_247, intersection_points_247);
 
   std::vector<std::vector<size_t>> intersection_prism_indices_157;
   std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_157;
-  computend({0, 4, 6}, aabb3d_bounds, prisms51, prisms57,
+  computend({0, 4, 6}, aabb3d_bounds, prisms51, prisms57, "157", verbose,
             intersection_prism_indices_157, intersection_points_157);
 
   std::vector<std::vector<size_t>> intersection_prism_indices_468;
   std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_468;
-  computend({3, 5, 7}, aabb3d_bounds, prisms84, prisms86,
+  computend({3, 5, 7}, aabb3d_bounds, prisms84, prisms86, "468", verbose,
             intersection_prism_indices_468, intersection_points_468);
 
   if (verbose) {
@@ -742,6 +782,37 @@ PhaseIntersectionResult compute_intersection_points(
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase0;
   std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
+
+  const std::size_t total_phase0_areas
+      = intersection_points_136.size() * intersection_prism_indices_247.size()
+        * triangles58.size();
+  std::size_t processed_phase0_areas = 0;
+  const auto phase0_started_at = std::chrono::steady_clock::now();
+  auto next_phase0_progress_at = phase0_started_at;
+  auto report_phase0_progress = [&](bool force) {
+    if (!verbose) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_phase0_progress_at) {
+      return;
+    }
+    const double percent
+        = total_phase0_areas == 0
+              ? 100.0
+              : 100.0 * static_cast<double>(processed_phase0_areas)
+                    / static_cast<double>(total_phase0_areas);
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - phase0_started_at).count();
+    std::cerr << std::format(
+        "Phase0 area assembly progress: {:.1f}% ({}/{} areas), vertices={}, "
+        "elapsed={:.1f}s\n",
+        percent, processed_phase0_areas, total_phase0_areas,
+        intersection_points_phase0.size(), elapsed_seconds);
+    std::cerr.flush();
+    next_phase0_progress_at = now + std::chrono::seconds(5);
+  };
+  report_phase0_progress(true);
 
   for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
     for (size_t i247 = 0; i247 < intersection_prism_indices_247.size();
@@ -781,6 +852,10 @@ PhaseIntersectionResult compute_intersection_points(
             }
           }
         }
+        ++processed_phase0_areas;
+        if (processed_phase0_areas % 1000 == 0) {
+          report_phase0_progress(false);
+        }
       }
       // auto t_end = std::chrono::high_resolution_clock::now();
       // std::chrono::duration<double> t_diff = t_end - t_start;
@@ -788,6 +863,38 @@ PhaseIntersectionResult compute_intersection_points(
       // t_diff.count() << "s" << std::endl;
     }
   }
+  report_phase0_progress(true);
+
+  const std::size_t total_phase1_areas
+      = intersection_points_157.size() * intersection_prism_indices_468.size()
+        * triangles23.size();
+  std::size_t processed_phase1_areas = 0;
+  const auto phase1_started_at = std::chrono::steady_clock::now();
+  auto next_phase1_progress_at = phase1_started_at;
+  auto report_phase1_progress = [&](bool force) {
+    if (!verbose) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_phase1_progress_at) {
+      return;
+    }
+    const double percent
+        = total_phase1_areas == 0
+              ? 100.0
+              : 100.0 * static_cast<double>(processed_phase1_areas)
+                    / static_cast<double>(total_phase1_areas);
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - phase1_started_at).count();
+    std::cerr << std::format(
+        "Phase1 area assembly progress: {:.1f}% ({}/{} areas), vertices={}, "
+        "elapsed={:.1f}s\n",
+        percent, processed_phase1_areas, total_phase1_areas,
+        intersection_points_phase1.size(), elapsed_seconds);
+    std::cerr.flush();
+    next_phase1_progress_at = now + std::chrono::seconds(5);
+  };
+  report_phase1_progress(true);
 
   for (size_t i157 = 0; i157 < intersection_points_157.size(); i157++) {
     for (size_t i468 = 0; i468 < intersection_prism_indices_468.size();
@@ -826,9 +933,14 @@ PhaseIntersectionResult compute_intersection_points(
             }
           }
         }
+        ++processed_phase1_areas;
+        if (processed_phase1_areas % 1000 == 0) {
+          report_phase1_progress(false);
+        }
       }
     }
   }
+  report_phase1_progress(true);
 
   PhaseIntersectionResult result;
   result.intersection_prism_indices_phase0
@@ -853,7 +965,12 @@ CommonRefinementResult compute_common_refinement_area_vertices(
     const std::vector<hcpwa::LineSet<8>>& prisms23,
     const std::vector<std::vector<size_t>>& phase0_area_prism_indices,
     const std::vector<std::vector<size_t>>& phase1_area_prism_indices,
+    const std::vector<std::vector<hcpwa::Vec<8>>>& phase0_area_vertices,
+    const std::vector<std::vector<hcpwa::Vec<8>>>& phase1_area_vertices,
     hcpwa::Float N, bool verbose) {
+  constexpr int kSpaceDim = 8;
+  constexpr double kBoundsTol = 1e-9;
+  constexpr double kRelativeRowTol = 1e-12;
   hcpwa::AABB<8> aabb
       = {{0, 0, 0, 0, 0, 0, 0, 0}, {N, N, N, N, N, N, N, N}};
   const auto aabb_bounds = hcpwa::AABBBounds(aabb);
@@ -883,67 +1000,466 @@ CommonRefinementResult compute_common_refinement_area_vertices(
     dst.insert(dst.end(), src.begin(), src.end());
   };
 
-  CommonRefinementResult result;
+  if (phase0_area_vertices.size() != phase0_area_prism_indices.size()) {
+    throw std::runtime_error(std::format(
+        "compute_common_refinement_area_vertices: phase 0 has {} area vertices "
+        "but {} prism-index tuples",
+        phase0_area_vertices.size(), phase0_area_prism_indices.size()));
+  }
+  if (phase1_area_vertices.size() != phase1_area_prism_indices.size()) {
+    throw std::runtime_error(std::format(
+        "compute_common_refinement_area_vertices: phase 1 has {} area vertices "
+        "but {} prism-index tuples",
+        phase1_area_vertices.size(), phase1_area_prism_indices.size()));
+  }
 
-  for (size_t phase0_area_id = 0;
-       phase0_area_id < phase0_area_prism_indices.size(); ++phase0_area_id) {
+  struct AreaBounds8d {
+    std::array<double, kSpaceDim> min{};
+    std::array<double, kSpaceDim> max{};
+  };
+  auto compute_bounds = [](const std::vector<hcpwa::Vec<8>>& vertices,
+                           int phase, size_t area_id) {
+    if (vertices.empty()) {
+      throw std::runtime_error(std::format(
+          "compute_common_refinement_area_vertices: phase {} area {} has no "
+          "vertices",
+          phase, area_id));
+    }
+    AreaBounds8d bounds;
+    for (int d = 0; d < kSpaceDim; ++d) {
+      bounds.min[d] = static_cast<double>(vertices[0][d]);
+      bounds.max[d] = static_cast<double>(vertices[0][d]);
+    }
+    for (const auto& vertex : vertices) {
+      for (int d = 0; d < kSpaceDim; ++d) {
+        const double value = static_cast<double>(vertex[d]);
+        bounds.min[d] = std::min(bounds.min[d], value);
+        bounds.max[d] = std::max(bounds.max[d], value);
+      }
+    }
+    return bounds;
+  };
+
+  auto boxes_have_full_dimensional_overlap
+      = [](const AreaBounds8d& lhs, const AreaBounds8d& rhs, double tol) {
+    for (int d = 0; d < kSpaceDim; ++d) {
+      const double overlap
+          = std::min(lhs.max[d], rhs.max[d])
+            - std::max(lhs.min[d], rhs.min[d]);
+      if (overlap <= tol) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  std::vector<std::array<size_t, 5>> phase0_prism_ids_cache;
+  std::vector<std::array<size_t, 5>> phase1_prism_ids_cache;
+  phase0_prism_ids_cache.reserve(phase0_area_prism_indices.size());
+  phase1_prism_ids_cache.reserve(phase1_area_prism_indices.size());
+
+  std::vector<AreaBounds8d> phase0_bounds;
+  std::vector<AreaBounds8d> phase1_bounds;
+  phase0_bounds.reserve(phase0_area_vertices.size());
+  phase1_bounds.reserve(phase1_area_vertices.size());
+
+  for (size_t phase0_area_id = 0; phase0_area_id < phase0_area_vertices.size();
+       ++phase0_area_id) {
     const auto& phase0_tuple = phase0_area_prism_indices[phase0_area_id];
     require_tuple(phase0_tuple, 0, phase0_area_id);
+    const std::array<size_t, 5> phase0_prism_ids = {
+        phase0_tuple[0], phase0_tuple[1], phase0_tuple[2], phase0_tuple[3],
+        phase0_tuple[4]};
+    require_index(
+        phase0_prism_ids[0], prisms31.size(), 0, phase0_area_id, 0, "31");
+    require_index(
+        phase0_prism_ids[1], prisms36.size(), 0, phase0_area_id, 1, "36");
+    require_index(
+        phase0_prism_ids[2], prisms24.size(), 0, phase0_area_id, 2, "24");
+    require_index(
+        phase0_prism_ids[3], prisms27.size(), 0, phase0_area_id, 3, "27");
+    require_index(
+        phase0_prism_ids[4], prisms58.size(), 0, phase0_area_id, 4, "58");
+    phase0_prism_ids_cache.push_back(phase0_prism_ids);
+    phase0_bounds.push_back(
+        compute_bounds(phase0_area_vertices[phase0_area_id], 0, phase0_area_id));
+  }
 
-    for (size_t phase1_area_id = 0;
-         phase1_area_id < phase1_area_prism_indices.size(); ++phase1_area_id) {
-      const auto& phase1_tuple = phase1_area_prism_indices[phase1_area_id];
-      require_tuple(phase1_tuple, 1, phase1_area_id);
+  for (size_t phase1_area_id = 0; phase1_area_id < phase1_area_vertices.size();
+       ++phase1_area_id) {
+    const auto& phase1_tuple = phase1_area_prism_indices[phase1_area_id];
+    require_tuple(phase1_tuple, 1, phase1_area_id);
+    const std::array<size_t, 5> phase1_prism_ids = {
+        phase1_tuple[0], phase1_tuple[1], phase1_tuple[2], phase1_tuple[3],
+        phase1_tuple[4]};
+    require_index(
+        phase1_prism_ids[0], prisms51.size(), 1, phase1_area_id, 0, "51");
+    require_index(
+        phase1_prism_ids[1], prisms57.size(), 1, phase1_area_id, 1, "57");
+    require_index(
+        phase1_prism_ids[2], prisms84.size(), 1, phase1_area_id, 2, "84");
+    require_index(
+        phase1_prism_ids[3], prisms86.size(), 1, phase1_area_id, 3, "86");
+    require_index(
+        phase1_prism_ids[4], prisms23.size(), 1, phase1_area_id, 4, "23");
+    phase1_prism_ids_cache.push_back(phase1_prism_ids);
+    phase1_bounds.push_back(
+        compute_bounds(phase1_area_vertices[phase1_area_id], 1, phase1_area_id));
+  }
 
-      // These tuple slots are the critical indexing contract between the area
-      // builder and the barycentric layer order. Keep them named here so a
-      // future change cannot silently swap, for example, prism 36 and prism 24.
-      const std::array<size_t, 5> phase0_prism_ids = {
-          phase0_tuple[0], phase0_tuple[1], phase0_tuple[2], phase0_tuple[3],
-          phase0_tuple[4]};
-      const std::array<size_t, 5> phase1_prism_ids = {
-          phase1_tuple[0], phase1_tuple[1], phase1_tuple[2], phase1_tuple[3],
-          phase1_tuple[4]};
-
-      require_index(phase0_prism_ids[0], prisms31.size(), 0, phase0_area_id, 0,
-                    "31");
-      require_index(phase0_prism_ids[1], prisms36.size(), 0, phase0_area_id, 1,
-                    "36");
-      require_index(phase0_prism_ids[2], prisms24.size(), 0, phase0_area_id, 2,
-                    "24");
-      require_index(phase0_prism_ids[3], prisms27.size(), 0, phase0_area_id, 3,
-                    "27");
-      require_index(phase0_prism_ids[4], prisms58.size(), 0, phase0_area_id, 4,
-                    "58");
-      require_index(phase1_prism_ids[0], prisms51.size(), 1, phase1_area_id, 0,
-                    "51");
-      require_index(phase1_prism_ids[1], prisms57.size(), 1, phase1_area_id, 1,
-                    "57");
-      require_index(phase1_prism_ids[2], prisms84.size(), 1, phase1_area_id, 2,
-                    "84");
-      require_index(phase1_prism_ids[3], prisms86.size(), 1, phase1_area_id, 3,
-                    "86");
-      require_index(phase1_prism_ids[4], prisms23.size(), 1, phase1_area_id, 4,
-                    "23");
-
-      hcpwa::LineSet<8> combined_prisms = aabb_bounds;
-      append_prism(combined_prisms, prisms31[phase0_prism_ids[0]]);
-      append_prism(combined_prisms, prisms36[phase0_prism_ids[1]]);
-      append_prism(combined_prisms, prisms24[phase0_prism_ids[2]]);
-      append_prism(combined_prisms, prisms27[phase0_prism_ids[3]]);
-      append_prism(combined_prisms, prisms58[phase0_prism_ids[4]]);
-      append_prism(combined_prisms, prisms51[phase1_prism_ids[0]]);
-      append_prism(combined_prisms, prisms57[phase1_prism_ids[1]]);
-      append_prism(combined_prisms, prisms84[phase1_prism_ids[2]]);
-      append_prism(combined_prisms, prisms86[phase1_prism_ids[3]]);
-      append_prism(combined_prisms, prisms23[phase1_prism_ids[4]]);
-
-      std::vector<hcpwa::Vec<8>> vertices
-          = hcpwa::LinesToPoints<8>(combined_prisms);
-      if (vertices.empty()) {
-        continue;
+  auto has_positive_width = [](const AreaBounds8d& bounds, double tol) {
+    for (int d = 0; d < kSpaceDim; ++d) {
+      if (bounds.max[d] - bounds.min[d] <= tol) {
+        return false;
       }
+    }
+    return true;
+  };
+  std::vector<size_t> eligible_phase0;
+  std::vector<size_t> eligible_phase1;
+  eligible_phase0.reserve(phase0_bounds.size());
+  eligible_phase1.reserve(phase1_bounds.size());
+  for (size_t id = 0; id < phase0_bounds.size(); ++id) {
+    if (has_positive_width(phase0_bounds[id], kBoundsTol)) {
+      eligible_phase0.push_back(id);
+    }
+  }
+  for (size_t id = 0; id < phase1_bounds.size(); ++id) {
+    if (has_positive_width(phase1_bounds[id], kBoundsTol)) {
+      eligible_phase1.push_back(id);
+    }
+  }
 
+  auto choose_sweep_axis_by_exact_overlap =
+      [&](const std::vector<size_t>& phase0_ids,
+          const std::vector<size_t>& phase1_ids) {
+        if (phase0_ids.empty() || phase1_ids.empty()) {
+          return std::pair<int, std::uint64_t>{0, 0};
+        }
+        int best_axis = 0;
+        std::uint64_t best_overlap = std::numeric_limits<std::uint64_t>::max();
+        for (int axis = 0; axis < kSpaceDim; ++axis) {
+          std::vector<double> min1;
+          std::vector<double> max1;
+          min1.reserve(phase1_ids.size());
+          max1.reserve(phase1_ids.size());
+          for (size_t id : phase1_ids) {
+            min1.push_back(phase1_bounds[id].min[axis]);
+            max1.push_back(phase1_bounds[id].max[axis]);
+          }
+          std::sort(min1.begin(), min1.end());
+          std::sort(max1.begin(), max1.end());
+
+          std::uint64_t overlap_count = 0;
+          for (size_t id : phase0_ids) {
+            const double right = phase0_bounds[id].max[axis] - kBoundsTol;
+            const double left = phase0_bounds[id].min[axis] + kBoundsTol;
+            const std::size_t started
+                = static_cast<std::size_t>(std::lower_bound(
+                      min1.begin(), min1.end(), right)
+                                           - min1.begin());
+            const std::size_t ended
+                = static_cast<std::size_t>(std::upper_bound(
+                      max1.begin(), max1.end(), left)
+                                           - max1.begin());
+            if (started > ended) {
+              overlap_count += static_cast<std::uint64_t>(started - ended);
+            }
+          }
+          if (overlap_count < best_overlap) {
+            best_overlap = overlap_count;
+            best_axis = axis;
+          }
+        }
+        return std::pair<int, std::uint64_t>{best_axis, best_overlap};
+      };
+
+  const auto [sweep_axis, axis_overlap_estimate]
+      = choose_sweep_axis_by_exact_overlap(eligible_phase0, eligible_phase1);
+
+  std::vector<size_t> phase1_by_min = eligible_phase1;
+  std::vector<size_t> phase1_by_max = eligible_phase1;
+  std::sort(phase1_by_min.begin(), phase1_by_min.end(),
+            [&](size_t lhs, size_t rhs) {
+              if (phase1_bounds[lhs].min[sweep_axis]
+                  != phase1_bounds[rhs].min[sweep_axis]) {
+                return phase1_bounds[lhs].min[sweep_axis]
+                       < phase1_bounds[rhs].min[sweep_axis];
+              }
+              return lhs < rhs;
+            });
+  std::sort(phase1_by_max.begin(), phase1_by_max.end(),
+            [&](size_t lhs, size_t rhs) {
+              if (phase1_bounds[lhs].max[sweep_axis]
+                  != phase1_bounds[rhs].max[sweep_axis]) {
+                return phase1_bounds[lhs].max[sweep_axis]
+                       < phase1_bounds[rhs].max[sweep_axis];
+              }
+              return lhs < rhs;
+            });
+
+  std::vector<double> phase1_min_sorted;
+  std::vector<double> phase1_max_sorted;
+  phase1_min_sorted.reserve(phase1_by_min.size());
+  phase1_max_sorted.reserve(phase1_by_max.size());
+  for (size_t id : phase1_by_min) {
+    phase1_min_sorted.push_back(phase1_bounds[id].min[sweep_axis]);
+  }
+  for (size_t id : phase1_by_max) {
+    phase1_max_sorted.push_back(phase1_bounds[id].max[sweep_axis]);
+  }
+
+  std::atomic<std::uint64_t> sweep_candidates{0};
+  std::atomic<std::uint64_t> processed_phase0{0};
+  const auto progress_started_at = std::chrono::steady_clock::now();
+  auto next_progress_at = progress_started_at;
+  auto report_box_progress = [&](bool force) {
+    if (!verbose) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_progress_at) {
+      return;
+    }
+    const std::uint64_t processed = processed_phase0.load();
+    const std::uint64_t candidates = sweep_candidates.load();
+    const double percent = eligible_phase0.empty()
+                               ? 100.0
+                               : 100.0 * static_cast<double>(processed)
+                                     / static_cast<double>(eligible_phase0.size());
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - progress_started_at).count();
+    std::cerr << std::format(
+        "Common refinement box scan: {:.1f}% ({}/{} areas), candidates={}, "
+        "elapsed={:.1f}s\n",
+        percent, processed, eligible_phase0.size(), candidates, elapsed_seconds);
+    std::cerr.flush();
+    next_progress_at = now + std::chrono::seconds(5);
+  };
+
+  const unsigned int hw = std::thread::hardware_concurrency();
+  const std::size_t worker_count = std::min<std::size_t>(
+      std::max<unsigned int>(1, hw),
+      std::max<std::size_t>(std::size_t{1}, eligible_phase0.size()));
+  const std::size_t chunk_size = worker_count == 0
+                                     ? 0
+                                     : (eligible_phase0.size() + worker_count - 1)
+                                           / worker_count;
+  std::vector<std::vector<std::pair<size_t, size_t>>> worker_matches(
+      worker_count);
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+
+  report_box_progress(true);
+  for (std::size_t worker_id = 0; worker_id < worker_count; ++worker_id) {
+    const std::size_t begin = worker_id * chunk_size;
+    const std::size_t end = std::min(eligible_phase0.size(), begin + chunk_size);
+    workers.emplace_back([&, worker_id, begin, end]() {
+      auto& local_matches = worker_matches[worker_id];
+      for (std::size_t idx = begin; idx < end; ++idx) {
+        const size_t phase0_area_id = eligible_phase0[idx];
+        const auto& p0 = phase0_bounds[phase0_area_id];
+        const double upper_bound_min = p0.max[sweep_axis] - kBoundsTol;
+        const double lower_bound_max = p0.min[sweep_axis] + kBoundsTol;
+
+        const std::size_t prefix_end = static_cast<std::size_t>(
+            std::lower_bound(phase1_min_sorted.begin(), phase1_min_sorted.end(),
+                             upper_bound_min)
+            - phase1_min_sorted.begin());
+        const std::size_t suffix_begin = static_cast<std::size_t>(
+            std::upper_bound(phase1_max_sorted.begin(), phase1_max_sorted.end(),
+                             lower_bound_max)
+            - phase1_max_sorted.begin());
+
+        if (prefix_end <= (phase1_max_sorted.size() - suffix_begin)) {
+          for (std::size_t i = 0; i < prefix_end; ++i) {
+            ++sweep_candidates;
+            const size_t phase1_area_id = phase1_by_min[i];
+            const auto& p1 = phase1_bounds[phase1_area_id];
+            if (p1.max[sweep_axis] <= lower_bound_max) {
+              continue;
+            }
+            if (boxes_have_full_dimensional_overlap(p0, p1, kBoundsTol)) {
+              local_matches.emplace_back(phase0_area_id, phase1_area_id);
+            }
+          }
+        } else {
+          for (std::size_t i = suffix_begin; i < phase1_max_sorted.size(); ++i) {
+            ++sweep_candidates;
+            const size_t phase1_area_id = phase1_by_max[i];
+            const auto& p1 = phase1_bounds[phase1_area_id];
+            if (p1.min[sweep_axis] >= upper_bound_min) {
+              continue;
+            }
+            if (boxes_have_full_dimensional_overlap(p0, p1, kBoundsTol)) {
+              local_matches.emplace_back(phase0_area_id, phase1_area_id);
+            }
+          }
+        }
+
+        ++processed_phase0;
+        report_box_progress(false);
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  report_box_progress(true);
+
+  std::vector<std::pair<size_t, size_t>> candidate_pairs;
+  std::size_t total_matches = 0;
+  for (const auto& local : worker_matches) {
+    total_matches += local.size();
+  }
+  candidate_pairs.reserve(total_matches);
+  for (auto& local : worker_matches) {
+    candidate_pairs.insert(candidate_pairs.end(), local.begin(), local.end());
+  }
+  std::sort(candidate_pairs.begin(), candidate_pairs.end());
+  candidate_pairs.erase(
+      std::unique(candidate_pairs.begin(), candidate_pairs.end()),
+      candidate_pairs.end());
+
+  CommonRefinementResult result;
+  std::uint64_t cdd_calls = 0;
+  std::size_t processed_candidates = 0;
+  auto next_cdd_progress_at = std::chrono::steady_clock::now();
+  auto report_cdd_progress = [&](bool force) {
+    if (!verbose) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_cdd_progress_at) {
+      return;
+    }
+    const double percent = candidate_pairs.empty()
+                               ? 100.0
+                               : 100.0 * static_cast<double>(processed_candidates)
+                                     / static_cast<double>(candidate_pairs.size());
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - progress_started_at).count();
+    std::cerr << std::format(
+        "Common refinement cdd pass: {:.1f}% ({}/{} pairs), cdd_calls={}, "
+        "areas={}, elapsed={:.1f}s\n",
+        percent, processed_candidates, candidate_pairs.size(), cdd_calls,
+        result.areas.size(), elapsed_seconds);
+    std::cerr.flush();
+    next_cdd_progress_at = now + std::chrono::seconds(5);
+  };
+
+  report_cdd_progress(true);
+  for (const auto& [phase0_area_id, phase1_area_id] : candidate_pairs) {
+    const auto& phase0_prism_ids = phase0_prism_ids_cache[phase0_area_id];
+    const auto& phase1_prism_ids = phase1_prism_ids_cache[phase1_area_id];
+    hcpwa::LineSet<8> combined_prisms = aabb_bounds;
+    append_prism(combined_prisms, prisms31[phase0_prism_ids[0]]);
+    append_prism(combined_prisms, prisms36[phase0_prism_ids[1]]);
+    append_prism(combined_prisms, prisms24[phase0_prism_ids[2]]);
+    append_prism(combined_prisms, prisms27[phase0_prism_ids[3]]);
+    append_prism(combined_prisms, prisms58[phase0_prism_ids[4]]);
+    append_prism(combined_prisms, prisms51[phase1_prism_ids[0]]);
+    append_prism(combined_prisms, prisms57[phase1_prism_ids[1]]);
+    append_prism(combined_prisms, prisms84[phase1_prism_ids[2]]);
+    append_prism(combined_prisms, prisms86[phase1_prism_ids[3]]);
+    append_prism(combined_prisms, prisms23[phase1_prism_ids[4]]);
+
+    for (auto& row : combined_prisms) {
+      double normal_scale = 0.0;
+      for (int col = 0; col < kSpaceDim; ++col) {
+        normal_scale
+            = std::max(normal_scale, std::abs(static_cast<double>(row[col])));
+      }
+      if (normal_scale == 0.0) {
+        throw std::runtime_error(
+            "compute_common_refinement_area_vertices: inequality has zero "
+            "normal");
+      }
+      const double zero_threshold = kRelativeRowTol * normal_scale;
+      for (int col = 0; col <= kSpaceDim; ++col) {
+        const double value = static_cast<double>(row[col]);
+        row[col] = std::abs(value) <= zero_threshold ? 0.0
+                                                     : value / normal_scale;
+      }
+    }
+
+    ++cdd_calls;
+    std::vector<hcpwa::Vec<8>> vertices;
+    try {
+      vertices = hcpwa::LinesToPoints<8>(combined_prisms);
+    } catch (const std::exception& error) {
+      std::cerr << "Common refinement cdd failure\n";
+      std::cerr << "  reason: " << error.what() << '\n';
+      std::cerr << "  sweep_axis: " << sweep_axis << '\n';
+      std::cerr << "  sweep_candidates: " << sweep_candidates.load() << '\n';
+      std::cerr << "  full_box_matches: " << candidate_pairs.size() << '\n';
+      std::cerr << "  cdd_call: " << cdd_calls << '\n';
+      std::cerr << "  phase0_area_id: " << phase0_area_id << '\n';
+      std::cerr << "  phase1_area_id: " << phase1_area_id << '\n';
+
+      auto print_ids = [](const char* label,
+                          const std::array<size_t, 5>& ids) {
+        std::cerr << "  " << label << ": [" << ids[0] << ", " << ids[1]
+                  << ", " << ids[2] << ", " << ids[3] << ", " << ids[4]
+                  << "]\n";
+      };
+      print_ids("phase0_prism_ids [31,36,24,27,58]", phase0_prism_ids);
+      print_ids("phase1_prism_ids [51,57,84,86,23]", phase1_prism_ids);
+
+      auto print_bounds = [&](const char* label, const AreaBounds8d& bounds) {
+        std::cerr << "  " << label << "_min: [";
+        for (int d = 0; d < kSpaceDim; ++d) {
+          std::cerr << (d == 0 ? "" : ", ") << bounds.min[d];
+        }
+        std::cerr << "]\n";
+        std::cerr << "  " << label << "_max: [";
+        for (int d = 0; d < kSpaceDim; ++d) {
+          std::cerr << (d == 0 ? "" : ", ") << bounds.max[d];
+        }
+        std::cerr << "]\n";
+      };
+      print_bounds("phase0_bounds", phase0_bounds[phase0_area_id]);
+      print_bounds("phase1_bounds", phase1_bounds[phase1_area_id]);
+
+      size_t non_finite_values = 0;
+      double max_abs_coefficient = 0.0;
+      double min_nonzero_abs_coefficient
+          = std::numeric_limits<double>::infinity();
+      for (const auto& row : combined_prisms) {
+        for (int col = 0; col <= kSpaceDim; ++col) {
+          const double value = static_cast<double>(row[col]);
+          if (!std::isfinite(value)) {
+            ++non_finite_values;
+            continue;
+          }
+          const double abs_value = std::abs(value);
+          max_abs_coefficient = std::max(max_abs_coefficient, abs_value);
+          if (abs_value > 0.0) {
+            min_nonzero_abs_coefficient
+                = std::min(min_nonzero_abs_coefficient, abs_value);
+          }
+        }
+      }
+      std::cerr << "  inequality_rows: " << combined_prisms.size() << '\n';
+      std::cerr << "  non_finite_values: " << non_finite_values << '\n';
+      std::cerr << "  min_nonzero_abs_coefficient: "
+                << min_nonzero_abs_coefficient << '\n';
+      std::cerr << "  max_abs_coefficient: " << max_abs_coefficient << '\n';
+      std::cerr << "  inequalities [a0..a7, constant]:\n";
+      for (size_t row_id = 0; row_id < combined_prisms.size(); ++row_id) {
+        std::cerr << "    " << row_id << ": [";
+        for (int col = 0; col <= kSpaceDim; ++col) {
+          std::cerr << (col == 0 ? "" : ", ")
+                    << static_cast<double>(combined_prisms[row_id][col]);
+        }
+        std::cerr << "]\n";
+      }
+      throw std::runtime_error(std::format(
+          "common refinement cdd failed for phase0 area {}, phase1 area {}, "
+          "cdd call {}: {}",
+          phase0_area_id, phase1_area_id, cdd_calls, error.what()));
+    }
+    if (!vertices.empty()) {
       CommonRefinementArea area;
       area.phase0_area_id = phase0_area_id;
       area.phase1_area_id = phase1_area_id;
@@ -952,9 +1468,26 @@ CommonRefinementResult compute_common_refinement_area_vertices(
       area.vertices = std::move(vertices);
       result.areas.push_back(std::move(area));
     }
+    ++processed_candidates;
+    report_cdd_progress(false);
   }
+  report_cdd_progress(true);
 
   if (verbose) {
+    std::cout << std::format("Common refinement workers: {}\n", worker_count);
+    std::cout << std::format("Common refinement eligible phase0 boxes: {}\n",
+                             eligible_phase0.size());
+    std::cout << std::format("Common refinement eligible phase1 boxes: {}\n",
+                             eligible_phase1.size());
+    std::cout << std::format(
+        "Common refinement selected-axis 1D overlap estimate: {}\n",
+        axis_overlap_estimate);
+    std::cout << std::format("Common refinement sweep axis: {}\n", sweep_axis);
+    std::cout << std::format("Common refinement sweep candidates: {}\n",
+                             sweep_candidates.load());
+    std::cout << std::format("Common refinement 8D-box matches: {}\n",
+                             candidate_pairs.size());
+    std::cout << std::format("Common refinement cdd calls: {}\n", cdd_calls);
     std::cout << "Common refinement areas count: " << result.areas.size()
               << '\n';
   }
@@ -983,8 +1516,39 @@ auto computend = []<int Dim>(
                      const hcpwa::LineSet<Dim>& bounds,
                      const std::vector<hcpwa::LineSet<8>>& prisms0,
                      const std::vector<hcpwa::LineSet<8>>& prisms1,
+                     const char* label,
+                     bool verbose,
                      std::vector<std::vector<size_t>>& out_indices,
                      std::vector<std::vector<hcpwa::Vec<Dim>>>& out_points) {
+  const std::size_t total_pairs = prisms0.size() * prisms1.size();
+  std::size_t processed_pairs = 0;
+  std::size_t non_empty_pairs = 0;
+  const auto started_at = std::chrono::steady_clock::now();
+  auto next_progress_at = started_at;
+  auto report_progress = [&](bool force) {
+    if (!verbose) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_progress_at) {
+      return;
+    }
+    const double percent
+        = total_pairs == 0
+              ? 100.0
+              : 100.0 * static_cast<double>(processed_pairs)
+                    / static_cast<double>(total_pairs);
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - started_at).count();
+    std::cerr << std::format(
+        "Intersection {} progress: {:.1f}% ({}/{} pairs), non_empty={}, "
+        "elapsed={:.1f}s\n",
+        label, percent, processed_pairs, total_pairs, non_empty_pairs,
+        elapsed_seconds);
+    std::cerr.flush();
+    next_progress_at = now + std::chrono::seconds(5);
+  };
+  report_progress(true);
   for (size_t idx0 = 0; idx0 < prisms0.size(); idx0++) {
     for (size_t idx1 = 0; idx1 < prisms1.size(); idx1++) {
       hcpwa::LineSet<Dim> concatenated_prisms = bounds;
@@ -997,13 +1561,19 @@ auto computend = []<int Dim>(
       }
       auto intersection = hcpwa::LinesToPoints<Dim>(concatenated_prisms);
       if (intersection.size() > 0) {
+        ++non_empty_pairs;
         out_points.push_back(intersection);
         // Store the indices of the prisms that form the intersection
         std::vector<size_t> prism_indices = {idx0, idx1};
         out_indices.push_back(prism_indices);
       }
+      ++processed_pairs;
+      if (processed_pairs % 10000 == 0) {
+        report_progress(false);
+      }
     }
   }
+  report_progress(true);
 };
 
 if (verbose) {
@@ -1015,22 +1585,22 @@ if (verbose) {
 
 std::vector<std::vector<size_t>> intersection_prism_indices_136;
 std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_136;
-computend({0, 2, 5}, aabb3d_bounds, prisms31, prisms36,
+computend({0, 2, 5}, aabb3d_bounds, prisms31, prisms36, "136", verbose,
           intersection_prism_indices_136, intersection_points_136);
 
 std::vector<std::vector<size_t>> intersection_prism_indices_247;
 std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_247;
-computend({1, 3, 6}, aabb3d_bounds, prisms24, prisms27,
+computend({1, 3, 6}, aabb3d_bounds, prisms24, prisms27, "247", verbose,
           intersection_prism_indices_247, intersection_points_247);
 
 std::vector<std::vector<size_t>> intersection_prism_indices_157;
 std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_157;
-computend({0, 4, 6}, aabb3d_bounds, prisms51, prisms57,
+computend({0, 4, 6}, aabb3d_bounds, prisms51, prisms57, "157", verbose,
           intersection_prism_indices_157, intersection_points_157);
 
 std::vector<std::vector<size_t>> intersection_prism_indices_468;
 std::vector<std::vector<hcpwa::Vec<3>>> intersection_points_468;
-computend({3, 5, 7}, aabb3d_bounds, prisms84, prisms86,
+computend({3, 5, 7}, aabb3d_bounds, prisms84, prisms86, "468", verbose,
           intersection_prism_indices_468, intersection_points_468);
 
 if (verbose) {
@@ -1047,6 +1617,37 @@ std::vector<std::vector<size_t>> intersection_prism_indices_phase0;
 std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase0;
 std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
 std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
+
+const std::size_t total_phase0_areas
+    = intersection_points_136.size() * intersection_prism_indices_247.size()
+      * polygons58.size();
+std::size_t processed_phase0_areas = 0;
+const auto phase0_started_at = std::chrono::steady_clock::now();
+auto next_phase0_progress_at = phase0_started_at;
+auto report_phase0_progress = [&](bool force) {
+  if (!verbose) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (!force && now < next_phase0_progress_at) {
+    return;
+  }
+  const double percent
+      = total_phase0_areas == 0
+            ? 100.0
+            : 100.0 * static_cast<double>(processed_phase0_areas)
+                  / static_cast<double>(total_phase0_areas);
+  const double elapsed_seconds
+      = std::chrono::duration<double>(now - phase0_started_at).count();
+  std::cerr << std::format(
+      "Phase0 area assembly progress: {:.1f}% ({}/{} areas), vertices={}, "
+      "elapsed={:.1f}s\n",
+      percent, processed_phase0_areas, total_phase0_areas,
+      intersection_points_phase0.size(), elapsed_seconds);
+  std::cerr.flush();
+  next_phase0_progress_at = now + std::chrono::seconds(5);
+};
+report_phase0_progress(true);
 
 for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
   for (size_t i247 = 0; i247 < intersection_prism_indices_247.size();
@@ -1086,6 +1687,10 @@ for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
           }
         }
       }
+      ++processed_phase0_areas;
+      if (processed_phase0_areas % 1000 == 0) {
+        report_phase0_progress(false);
+      }
     }
     // auto t_end = std::chrono::high_resolution_clock::now();
     // std::chrono::duration<double> t_diff = t_end - t_start;
@@ -1093,6 +1698,38 @@ for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
     // t_diff.count() << "s" << std::endl;
   }
 }
+report_phase0_progress(true);
+
+const std::size_t total_phase1_areas
+    = intersection_points_157.size() * intersection_prism_indices_468.size()
+      * polygons23.size();
+std::size_t processed_phase1_areas = 0;
+const auto phase1_started_at = std::chrono::steady_clock::now();
+auto next_phase1_progress_at = phase1_started_at;
+auto report_phase1_progress = [&](bool force) {
+  if (!verbose) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (!force && now < next_phase1_progress_at) {
+    return;
+  }
+  const double percent
+      = total_phase1_areas == 0
+            ? 100.0
+            : 100.0 * static_cast<double>(processed_phase1_areas)
+                  / static_cast<double>(total_phase1_areas);
+  const double elapsed_seconds
+      = std::chrono::duration<double>(now - phase1_started_at).count();
+  std::cerr << std::format(
+      "Phase1 area assembly progress: {:.1f}% ({}/{} areas), vertices={}, "
+      "elapsed={:.1f}s\n",
+      percent, processed_phase1_areas, total_phase1_areas,
+      intersection_points_phase1.size(), elapsed_seconds);
+  std::cerr.flush();
+  next_phase1_progress_at = now + std::chrono::seconds(5);
+};
+report_phase1_progress(true);
 
 for (size_t i157 = 0; i157 < intersection_points_157.size(); i157++) {
   for (size_t i468 = 0; i468 < intersection_prism_indices_468.size();
@@ -1131,9 +1768,14 @@ for (size_t i157 = 0; i157 < intersection_points_157.size(); i157++) {
           }
         }
       }
+      ++processed_phase1_areas;
+      if (processed_phase1_areas % 1000 == 0) {
+        report_phase1_progress(false);
+      }
     }
   }
 }
+report_phase1_progress(true);
 
 PhaseIntersectionResult result;
 result.intersection_prism_indices_phase0
@@ -1213,8 +1855,8 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
       = compute_common_refinement_area_vertices(
           prisms31, prisms36, prisms24, prisms27, prisms58, prisms51, prisms57,
           prisms84, prisms86, prisms23, intersection_prism_indices_phase0,
-          intersection_prism_indices_phase1, static_cast<hcpwa::Float>(N),
-          verbose);
+          intersection_prism_indices_phase1, intersection_points_phase0,
+          intersection_points_phase1, static_cast<hcpwa::Float>(N), verbose);
 
   TriangleAreasVerticesResult result;
   // Phase 0

@@ -200,6 +200,8 @@ CommonRefinementResult compute_common_refinement_area_vertices(
     const std::vector<hcpwa::LineSet<8>>& prisms23,
     const std::vector<std::vector<size_t>>& phase0_area_prism_indices,
     const std::vector<std::vector<size_t>>& phase1_area_prism_indices,
+    const std::vector<std::vector<hcpwa::Vec<8>>>& phase0_area_vertices,
+    const std::vector<std::vector<hcpwa::Vec<8>>>& phase1_area_vertices,
     hcpwa::Float N, bool verbose = false);
 
 // Compute areas vertices - pure C++ computation logic

@@ -8,6 +8,8 @@
 #include <Highs.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
@@ -91,16 +93,6 @@ void appendSparseRow(std::vector<int>& starts, std::vector<int>& cols,
   starts.push_back(nnz);
 }
 
-// Applies the same sparse-row coefficient accumulation to the LP objective. The
-// objective is dense because HiGHS accepts column costs as a dense array.
-void addSparseToObjective(Eigen::RowVectorXd& objective,
-                          const barycentric_affine_approximator::SparseVec& v,
-                          double scale = 1.0) {
-  for (std::size_t i = 0; i < v.cols.size(); ++i) {
-    objective(v.cols[i]) += scale * v.vals[i];
-  }
-}
-
 // Computes beta = Psi_j^T * w as a sparse vector over the x block. This is the
 // implementation of beta_{j,nu} = Psi_j^T (A_j nu + f_j + c_{j,nu}).
 barycentric_affine_approximator::SparseVec psiTransposeTimes(
@@ -176,13 +168,15 @@ int BarycentricVarLayout::idxY(int region, int dim) const {
 
 BarycentricAffineApproximator::BarycentricAffineApproximator(
     double t_max, int t_split_count, double tau_min, double tau_max,
-    const SystemParams& system_params, bool highs_verbose)
+    const SystemParams& system_params, bool highs_verbose,
+    ApproximationMode mode)
     : t_max_(t_max),
       t_split_count_(t_split_count),
       tau_min_(tau_min),
       tau_max_(tau_max),
       system_params_(system_params),
-      highs_verbose_(highs_verbose) {
+      highs_verbose_(highs_verbose),
+      approximation_mode_(mode) {
   // This constructor mirrors GlobalAffineApproximator because the time-grid and
   // solver-reuse logic should behave the same. Only the LP variable layout is
   // different later.
@@ -237,9 +231,12 @@ void BarycentricAffineApproximator::dumpInitParamsToJson(
   // This dump mirrors the global affine class so output folders remain
   // inspectable in the same way once the barycentric path is runnable.
   const SystemParams& p = system_params_;
+  const char* mode_str
+      = approximation_mode_ == ApproximationMode::Upper ? "upper" : "lower";
   std::ostringstream out;
   out << "{\n"
       << "  \"t_max\": " << t_max_ << ",\n"
+      << "  \"approximation_mode\": \"" << mode_str << "\",\n"
       << "  \"t_split_count\": " << t_split_count_ << ",\n"
       << "  \"max_switches\": " << max_switches_ << ",\n"
       << "  \"tau_min\": " << tau_min_ << ",\n"
@@ -496,8 +493,18 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
     layouts_[phase] = layout;
   }
 
+  // Common-refinement vertices are deduplicated globally, but cell membership is
+  // preserved: the lower-bound border LP selects one family member per cell, so
+  // it needs to know which vertices belong to the same cell (step 2.2, 6.1).
   common_refinement_vertices_.clear();
+  refinement_cells_.clear();
+  refinement_cells_.reserve(areas_vertices.common_refinement.areas.size());
   for (const auto& area : areas_vertices.common_refinement.areas) {
+    RefinementCell cell;
+    cell.phase0_area_id = static_cast<int>(area.phase0_area_id);
+    cell.phase1_area_id = static_cast<int>(area.phase1_area_id);
+    cell.vertex_ids.reserve(area.vertices.size());
+
     for (const auto& vertex : area.vertices) {
       Eigen::VectorXd g = toEigen8(vertex);
       for (int d = 0; d < kSpaceDim; ++d) {
@@ -517,32 +524,222 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
         }
       }
 
-      bool already_seen = false;
-      for (const Eigen::VectorXd& existing : common_refinement_vertices_) {
-        if ((existing - g).norm() <= kGeomEps) {
-          already_seen = true;
+      int vertex_id = -1;
+      for (int i = 0;
+           i < static_cast<int>(common_refinement_vertices_.size()); ++i) {
+        if ((common_refinement_vertices_[i] - g).norm() <= kGeomEps) {
+          vertex_id = i;
           break;
         }
       }
-      if (!already_seen) {
+      if (vertex_id < 0) {
         common_refinement_vertices_.push_back(std::move(g));
+        vertex_id = static_cast<int>(common_refinement_vertices_.size() - 1);
       }
+      cell.vertex_ids.push_back(vertex_id);
     }
+
+    if (cell.vertex_ids.empty()) {
+      throw std::runtime_error(
+          "getIntersectionPoints: common-refinement cell has no vertices");
+    }
+    refinement_cells_.push_back(std::move(cell));
   }
 
-  if (common_refinement_vertices_.empty()) {
+  if (common_refinement_vertices_.empty() || refinement_cells_.empty()) {
     throw std::runtime_error(
         "getIntersectionPoints: common-refinement test set is empty");
   }
 
   // Every border test point must be evaluable in both phase partitions. This
   // validation is intentionally done during geometry construction so a prism
-  // tuple/order bug fails before any LP coefficients are stored.
-  for (const Eigen::VectorXd& g : common_refinement_vertices_) {
-    for (int phase = 0; phase < kPhases; ++phase) {
-      (void)locateRegion(phase, g, kEps);
+  // tuple/order bug fails before any LP coefficients are stored. The phi rows
+  // found here are cached: the border LP runs once per (level, theta, phase).
+  // We use the already stored phase-area ancestors from each refinement cell
+  // instead of searching all phase regions for every deduplicated vertex.
+  for (int phase = 0; phase < kPhases; ++phase) {
+    phi_at_refinement_[phase].clear();
+    phi_at_refinement_[phase].resize(common_refinement_vertices_.size());
+  }
+  std::array<std::vector<bool>, kPhases> phi_initialized;
+  for (int phase = 0; phase < kPhases; ++phase) {
+    phi_initialized[phase].assign(common_refinement_vertices_.size(), false);
+  }
+  for (const RefinementCell& cell : refinement_cells_) {
+    const std::array<int, kPhases> ancestor_regions
+        = {cell.phase0_area_id, cell.phase1_area_id};
+    for (int vertex_id : cell.vertex_ids) {
+      if (vertex_id < 0
+          || vertex_id >= static_cast<int>(common_refinement_vertices_.size())) {
+        throw std::runtime_error(
+            "getIntersectionPoints: refinement cell references invalid vertex id");
+      }
+      const Eigen::VectorXd& g = common_refinement_vertices_[vertex_id];
+      for (int phase = 0; phase < kPhases; ++phase) {
+        if (phi_initialized[phase][vertex_id]) {
+          continue;
+        }
+        const int region = ancestor_regions[phase];
+        SparseVec phi = buildPhiRow(phase, region, g, kEps);
+
+        // Invariant of the barycentric representation: the coordinates of each
+        // of the five projection layers sum to one, hence five in total.
+        double sum = 0.0;
+        for (double value : phi.vals) {
+          if (value < -kEps) {
+            throw std::runtime_error(
+                "getIntersectionPoints: negative barycentric coordinate");
+          }
+          sum += value;
+        }
+        if (std::abs(sum - static_cast<double>(kSubsystemCount)) > 1e-6) {
+          std::ostringstream details;
+          details << "phase=" << phase << ", region=" << region
+                  << ", sum=" << sum << ", expected=" << kSubsystemCount
+                  << ", point=[";
+          for (int d = 0; d < kSpaceDim; ++d) {
+            details << (d == 0 ? "" : ", ") << g(d);
+          }
+          details << "], phi={";
+          for (std::size_t i = 0; i < phi.vals.size(); ++i) {
+            details << (i == 0 ? "" : ", ") << phi.cols[i] << ":"
+                    << phi.vals[i];
+          }
+          details << "}";
+          logger_->error(
+              "getIntersectionPoints: phi row does not sum to "
+              "kSubsystemCount: {}",
+              details.str());
+          throw std::runtime_error(std::format(
+              "getIntersectionPoints: phi row sum {} does not equal {} for phase "
+              "{} region {}",
+              sum, kSubsystemCount, phase, region));
+        }
+
+        phi_at_refinement_[phase][vertex_id] = std::move(phi);
+        phi_initialized[phase][vertex_id] = true;
+      }
     }
   }
+  for (int phase = 0; phase < kPhases; ++phase) {
+    for (int vertex_id = 0;
+         vertex_id < static_cast<int>(common_refinement_vertices_.size());
+         ++vertex_id) {
+      if (!phi_initialized[phase][vertex_id]) {
+        throw std::runtime_error(std::format(
+            "getIntersectionPoints: missing cached phi row for phase {} vertex "
+            "{}",
+            phase, vertex_id));
+      }
+    }
+  }
+
+  computeNodeWeights();
+}
+
+void BarycentricAffineApproximator::computeNodeWeights() {
+  // w_(s,k) = integral over Omega of the hat function of node (s,k).
+  // Omega = [0,N]^8 and P_s keeps two coordinates, so the integral factorizes:
+  //   int_Omega alpha^(s)_k(P_s n) dn = N^6 * int_{[0,N]^2} alpha^(s)_k(u) du,
+  // and the integral of a barycentric coordinate over its triangle is
+  // area/3 (step 2.2, section 7).
+  const double n6 = std::pow(system_params_.N, kSpaceDim - 2);
+  const double expected = static_cast<double>(kSubsystemCount)
+                          * std::pow(system_params_.N, kSpaceDim);
+
+  std::size_t total_triangles = 0;
+  for (int phase = 0; phase < kPhases; ++phase) {
+    for (int s = 0; s < kSubsystemCount; ++s) {
+      total_triangles += phase_geometries_[phase].layers[s].triangles.size();
+    }
+  }
+  logger_->info(
+      "computeNodeWeights: starting over {} phases, {} total triangles",
+      kPhases, total_triangles);
+
+  std::size_t processed_triangles = 0;
+  const auto started_at = std::chrono::steady_clock::now();
+  auto next_progress_at = started_at;
+  auto report_progress = [&](bool force, int phase, int subsystem) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_progress_at) {
+      return;
+    }
+    const double percent
+        = total_triangles == 0
+              ? 100.0
+              : 100.0 * static_cast<double>(processed_triangles)
+                    / static_cast<double>(total_triangles);
+    const double elapsed_seconds
+        = std::chrono::duration<double>(now - started_at).count();
+    logger_->info(
+        "computeNodeWeights progress: {:.1f}% ({}/{} triangles), "
+        "phase={}/{}, subsystem={}/{}, elapsed={:.1f}s",
+        percent, processed_triangles, total_triangles, phase + 1, kPhases,
+        subsystem + 1, kSubsystemCount, elapsed_seconds);
+    next_progress_at = now + std::chrono::seconds(5);
+  };
+  report_progress(true, 0, 0);
+
+  for (int phase = 0; phase < kPhases; ++phase) {
+    const auto& geometry = phase_geometries_[phase];
+    const auto& layout = layouts_[phase];
+    Eigen::VectorXd w = Eigen::VectorXd::Zero(layout.num_x);
+    logger_->info(
+        "computeNodeWeights: phase {}/{} num_x={}", phase + 1, kPhases,
+        layout.num_x);
+
+    for (int s = 0; s < kSubsystemCount; ++s) {
+      const auto& layer = geometry.layers[s];
+      if (layer.triangles.size() != layer.bases.size()) {
+        throw std::runtime_error(
+            "computeNodeWeights: triangle and basis counts differ");
+      }
+      logger_->info(
+          "computeNodeWeights: phase {}/{} subsystem {}/{} triangles={}",
+          phase + 1, kPhases, s + 1, kSubsystemCount, layer.triangles.size());
+      for (std::size_t m = 0; m < layer.triangles.size(); ++m) {
+        const Eigen::Vector2d a = toEigen2(layer.triangles[m].a);
+        const Eigen::Vector2d b = toEigen2(layer.triangles[m].b);
+        const Eigen::Vector2d c = toEigen2(layer.triangles[m].c);
+        const double area
+            = 0.5
+              * std::abs((b(0) - a(0)) * (c(1) - a(1))
+                         - (c(0) - a(0)) * (b(1) - a(1)));
+        for (int local_vertex = 0; local_vertex < 3; ++local_vertex) {
+          const int col
+              = layout.idxX(s, layer.bases[m].vertex_ids[local_vertex]);
+          w(col) += n6 * area / 3.0;
+        }
+        ++processed_triangles;
+        if ((processed_triangles % 10000) == 0) {
+          report_progress(false, phase, s);
+        }
+      }
+      report_progress(true, phase, s);
+    }
+
+    // Control identity: every triangle is counted once per vertex, so each layer
+    // integrates to |Omega| and the five layers to 5|Omega|. A mismatch means the
+    // triangulation does not tile [0,N]^2 or a vertex id is wrong.
+    const double w_sum = w.sum();
+    const double abs_diff = std::abs(w_sum - expected);
+    const double rel_error = abs_diff / expected;
+    // if (abs_diff > 1e-6 * expected) {
+    //   throw std::runtime_error(
+    //       std::format(
+    //           "computeNodeWeights: node weights failed the 1^T w = 5 N^8 identity. w.sum = {:.16f}, expected = {:.16f}, abs_diff = {:.16f}, rel_error = {:.16e}",
+    //           w_sum, expected, abs_diff, rel_error)
+    //       );
+    // }
+    logger_->info(
+        "computeNodeWeights: phase {}/{} identity ok (w.sum={:.6f}, "
+        "expected={:.6f}, rel_error={:.3e})",
+        phase + 1, kPhases, w_sum, expected, rel_error);
+    node_weights_[phase] = std::move(w);
+  }
+  report_progress(true, kPhases - 1, kSubsystemCount - 1);
+  logger_->info("computeNodeWeights: finished");
 }
 
 SparseVec BarycentricAffineApproximator::buildPhiRow(
@@ -590,7 +787,10 @@ SparseVec BarycentricAffineApproximator::buildPhiRow(
             "buildPhiRow: point is outside selected simplex");
       }
       const int x_col = layout.idxX(s, basis.vertex_ids[local_vertex]);
-      phi.add(x_col, alpha(local_vertex));
+      // Preserve near-boundary barycentric coordinates. SparseVec::add defaults
+      // to kEps (1e-5), which is larger than the geometry tolerance and can
+      // remove enough mass for the five-layer phi row to stop summing to five.
+      phi.add(x_col, alpha(local_vertex), kGeomEps);
     }
   }
   return phi;
@@ -641,15 +841,6 @@ std::vector<int> BarycentricAffineApproximator::locateRegions(
     }
   }
   return matches;
-}
-
-int BarycentricAffineApproximator::locateRegion(
-    int phase, const Eigen::VectorXd& point, double tolerance) const {
-  std::vector<int> matches = locateRegions(phase, point, tolerance);
-  if (matches.empty()) {
-    throw std::runtime_error("locateRegion: point is outside phase partition");
-  }
-  return matches.front();
 }
 
 double BarycentricAffineApproximator::evaluateBarycentricValue(
@@ -952,6 +1143,10 @@ BarycentricAffineApproximator::prepareLpMatrices(int phase) {
   std::vector<double> row_upper;
   Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(n_cols);
 
+  // s = +1 for the upper bound, -1 for the lower one. After the corrections of
+  // step 2.1 this is the only thing separating the two directions.
+  const double s = signS();
+
   rhs_terms_[phase].clear();
   psi_by_region_[phase].clear();
   psi_by_region_[phase].resize(layout.num_regions);
@@ -1012,32 +1207,75 @@ BarycentricAffineApproximator::prepareLpMatrices(int phase) {
         }
       }
 
-      // a = Psi_j^T (d + c) - phi / dt. This is the x_k coefficient in the
-      // discretized residual:
-      //   F = a^T x_k + phi^T x_next / dt + g(nu)
-      //       - rho^T |Psi_j x_k|.
-      SparseVec a = psiTransposeTimes(psi_j, d + c);
+      // m = A_j nu + f_j + c_j(nu): the drift with the disturbance-box centre
+      // folded in. Used by the Right row, whose RHS is recomputed per step.
+      const Eigen::VectorXd m = d + c;
+      const double g_nu = g_j_vecs[j].dot(nu) + g_j_scals[j];
+
+      // ---- Row (L): the segment endpoint with the unknown value z. ----
+      // F^L = a^T z + b + s rho^T |Psi_j z|, with
+      //   a = Psi_j^T m - phi / dt,  b = phi^T x_next / dt + g(nu).
+      // The modulus is taken at the unknown, so it is lifted to y_j >= |Psi_j z|
+      // and the row reads  s a^T z + rho^T y_j <= -s b.  Note that rho enters
+      // with a plus for BOTH directions; only a and the RHS flip (step 2.1, 4).
+      SparseVec a = psiTransposeTimes(psi_j, m);
       for (std::size_t k = 0; k < phi.cols.size(); ++k) {
         a.add(phi.cols[k], -phi.vals[k] / t_delta_);
       }
 
-      SparseVec residual_row = a;
-      for (int r = 0; r < kSpaceDim; ++r) {
-        residual_row.add(layout.idxY(j, r), -rho(r));
+      SparseVec left_row;
+      for (std::size_t k = 0; k < a.cols.size(); ++k) {
+        left_row.add(a.cols[k], s * a.vals[k]);
       }
-      appendSparseRow(starts, col_index, value, residual_row, kEps);
-
-      const double g_nu = g_j_vecs[j].dot(nu) + g_j_scals[j];
-      row_lower.push_back(-std::numeric_limits<double>::infinity());
-      row_upper.push_back(-g_nu);
-      rhs_terms_[phase].push_back(
-          ResidualRhsTerm{static_cast<int>(row_upper.size() - 1), phi});
-
-      // Objective maximizes sum of residuals without the per-step constants:
-      //   sum (a^T x_k - rho^T y_j).
-      addSparseToObjective(c_vec, a);
       for (int r = 0; r < kSpaceDim; ++r) {
-        c_vec(layout.idxY(j, r)) -= rho(r);
+        left_row.add(layout.idxY(j, r), rho(r));
+      }
+      appendSparseRow(starts, col_index, value, left_row, kEps);
+      row_lower.push_back(-std::numeric_limits<double>::infinity());
+      // Fixed part of -s b; the -s phi^T x_next / dt part is added per step.
+      row_upper.push_back(-s * g_nu);
+      {
+        ResidualRhsTerm term;
+        term.row_id = static_cast<int>(row_upper.size() - 1);
+        term.kind = RhsKind::Left;
+        term.phi = phi;
+        rhs_terms_[phase].push_back(std::move(term));
+      }
+
+      // ---- Row (R): the segment endpoint with the known value x_next. ----
+      // F^R = phi^T (x_next - z) / dt + beta, with
+      //   beta = q^T m + s rho^T |q| + g(nu),  q = Psi_j x_next.
+      // Multiplying by dt > 0 gives the row  -s phi^T z <= -s (phi^T x_next +
+      // dt beta).  There is no y block here: the modulus is taken at the known
+      // x_next and therefore evaluates to a number (step 2.1, 3.1).
+      SparseVec right_row;
+      for (std::size_t k = 0; k < phi.cols.size(); ++k) {
+        right_row.add(phi.cols[k], -s * phi.vals[k]);
+      }
+      appendSparseRow(starts, col_index, value, right_row, kEps);
+      row_lower.push_back(-std::numeric_limits<double>::infinity());
+      // Entirely dynamic: recomputed from scratch in updateHighsRhsUpperBounds.
+      row_upper.push_back(0.0);
+      {
+        ResidualRhsTerm term;
+        term.row_id = static_cast<int>(row_upper.size() - 1);
+        term.kind = RhsKind::Right;
+        term.phi = phi;
+        term.region = j;
+        term.m = m;
+        term.rho = rho;
+        term.g = g_nu;
+        rhs_terms_[phase].push_back(std::move(term));
+      }
+
+      // Objective: l1 norm of the residuals at the endpoint with the known
+      // value. That residual is linear in z (no modulus, no y), so its l1 norm
+      // is an exact LP objective; the residual at the other endpoint is concave
+      // in z and cannot be minimized by an LP (step 2.1, section 5).
+      //   delta^R     = -s F^R = (s/dt) phi^T z + const,
+      //   sum delta^R = (s/dt) (sum phi)^T z + const,   minimized.
+      for (std::size_t k = 0; k < phi.cols.size(); ++k) {
+        c_vec(phi.cols[k]) += (s / t_delta_) * phi.vals[k];
       }
     }
 
@@ -1063,6 +1301,14 @@ BarycentricAffineApproximator::prepareLpMatrices(int phase) {
       row_upper.push_back(0.0);
     }
   }
+
+  const int n_rows = static_cast<int>(row_upper.size());
+  const int nnz = static_cast<int>(value.size());
+  logger_->info(
+      "prepareLpMatrices: phase={}, variables(num_cols)={}, num_x={}, "
+      "num_y={}, regions={}, rows={}, nnz={}, rhs_terms={}",
+      phase, n_cols, layout.num_x, kSpaceDim * layout.num_regions,
+      layout.num_regions, n_rows, nnz, rhs_terms_[phase].size());
 
   return std::make_tuple(std::move(starts), std::move(col_index),
                          std::move(value), std::move(row_lower),
@@ -1105,6 +1351,118 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   }
 
   const std::vector<int> theta_end_ids = admissibleThetaIds(theta);
+  const bool is_upper = approximation_mode_ == ApproximationMode::Upper;
+  const int n_points = static_cast<int>(common_refinement_vertices_.size());
+
+  // The family of already computed members, fetched once. Two reasons to hoist
+  // it out of the vertex loop instead of refetching per vertex:
+  //   - ValueFunction::get returns by value under a mutex, so a per-vertex fetch
+  //     would take |vertices| * |members| locked copies of an eta-vector and
+  //     serialize the border LPs of all worker threads;
+  //   - the member index c then denotes the same (level, theta*) pair for every
+  //     vertex by construction, which is what the per-cell selection below
+  //     relies on.
+  std::vector<std::vector<double>> candidates;
+  for (int r = 0; r < switch_cnt; ++r) {
+    for (int theta_end_idx : theta_end_ids) {
+      if (!value_function_.contains(source_phase, r, theta_idx,
+                                    theta_end_idx)) {
+        // Missing candidates are skipped explicitly and never replaced by zero:
+        // a fabricated zero would silently weaken the border condition.
+        continue;
+      }
+      std::vector<double> x_src
+          = value_function_.get(source_phase, r, theta_idx, theta_end_idx);
+      if (x_src.size() != static_cast<std::size_t>(source_layout.num_x)) {
+        throw std::runtime_error(
+            "getBorderConditions: source vector has invalid size");
+      }
+      candidates.push_back(std::move(x_src));
+    }
+  }
+  if (candidates.empty()) {
+    throw std::runtime_error(
+        "getBorderConditions: no source candidates for the border condition");
+  }
+  const int n_candidates = static_cast<int>(candidates.size());
+
+  // val[g][c] = phi^(source)(g)^T u^(c). The upper branch only needs the maximum
+  // over c at each g; the lower branch needs the whole table, because it selects
+  // one member per refinement cell.
+  //
+  // The source-side phi row is the cached one. Calling evaluateBarycentricValue
+  // here instead would relocate g among all source regions on every (g, c) pair,
+  // which is O(#regions) each time. The cached row comes from the same region
+  // that lookup would return, and the barycentric function is continuous across
+  // region boundaries by construction (neighbouring regions share node values),
+  // so the value is the same.
+  std::vector<std::vector<double>> val(
+      static_cast<std::size_t>(n_points),
+      std::vector<double>(static_cast<std::size_t>(n_candidates), 0.0));
+  for (int g_id = 0; g_id < n_points; ++g_id) {
+    const SparseVec& phi_src = phi_at_refinement_[source_phase][g_id];
+    for (int c = 0; c < n_candidates; ++c) {
+      const double val_src = phi_src.dot(candidates[c]);
+      if (!std::isfinite(val_src)) {
+        throw std::runtime_error("getBorderConditions: non-finite source value");
+      }
+      val[g_id][c] = val_src;
+    }
+  }
+
+  // Right-hand sides.
+  //
+  // Upper bound: the requirement is  phi^T x_L >= h(g) = max_c val[g][c].
+  // On a refinement cell the left side is affine and h is convex (a max of
+  // affine functions), so their difference is concave and its minimum sits at a
+  // vertex: the vertex rows are exact (step 2.2, section 4).
+  //
+  // Lower bound: the requirement is  phi^T x_L <= h(g), and now the difference
+  // is convex, so vertices are NOT sufficient. Instead one family member is
+  // fixed per cell; both sides are then affine on that cell and vertices become
+  // exact again, while "member <= max" keeps the condition sufficient
+  // (step 2.2, section 6.1). A vertex shared by several cells keeps the
+  // tightest of the bounds it receives.
+  std::vector<double> rhs(static_cast<std::size_t>(n_points));
+  if (is_upper) {
+    for (int g_id = 0; g_id < n_points; ++g_id) {
+      rhs[g_id] = *std::max_element(val[g_id].begin(), val[g_id].end());
+    }
+  } else {
+    std::fill(rhs.begin(), rhs.end(), std::numeric_limits<double>::infinity());
+    for (const RefinementCell& cell : refinement_cells_) {
+      // The member is affine on the cell, so its value at the barycentre of the
+      // cell vertices equals the mean of its vertex values. Picking the member
+      // with the largest mean is a heuristic: it affects tightness only, never
+      // correctness.
+      int best = -1;
+      double best_mean = -std::numeric_limits<double>::infinity();
+      for (int c = 0; c < n_candidates; ++c) {
+        double mean = 0.0;
+        for (int g_id : cell.vertex_ids) {
+          mean += val[g_id][c];
+        }
+        mean /= static_cast<double>(cell.vertex_ids.size());
+        if (mean > best_mean) {
+          best_mean = mean;
+          best = c;
+        }
+      }
+      if (best < 0) {
+        throw std::runtime_error(
+            "getBorderConditions: no family member selected for a cell");
+      }
+      for (int g_id : cell.vertex_ids) {
+        rhs[g_id] = std::min(rhs[g_id], val[g_id][best]);
+      }
+    }
+    for (int g_id = 0; g_id < n_points; ++g_id) {
+      if (!std::isfinite(rhs[g_id])) {
+        throw std::runtime_error(
+            "getBorderConditions: border point belongs to no refinement cell");
+      }
+    }
+  }
 
   std::vector<int> starts = {0};
   std::vector<int> col_index;
@@ -1112,63 +1470,39 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   std::vector<double> row_lower;
   std::vector<double> row_upper;
   std::vector<SparseVec> phi_rows;
-  std::vector<double> w_values;
-  Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(target_layout.num_x);
 
   Highs highs;
   const double inf = highs.getInfinity();
 
-  row_lower.reserve(common_refinement_vertices_.size());
-  row_upper.reserve(common_refinement_vertices_.size());
-  phi_rows.reserve(common_refinement_vertices_.size());
-  w_values.reserve(common_refinement_vertices_.size());
+  row_lower.reserve(static_cast<std::size_t>(n_points));
+  row_upper.reserve(static_cast<std::size_t>(n_points));
+  phi_rows.reserve(static_cast<std::size_t>(n_points));
 
-  for (const Eigen::VectorXd& g : common_refinement_vertices_) {
-    // The target-side row phi_g maps target barycentric coefficients to the
-    // boundary value at the common-refinement vertex g.
-    const int target_region = locateRegion(target_phase, g, kEps);
-    SparseVec phi = buildPhiRow(target_phase, target_region, g, kEps);
+  // Objective: the integral gap over Omega. Since h does not depend on x_L, that
+  // gap equals w^T x_L up to a constant, with w = integral of phi over Omega.
+  // Minimized for the upper bound, maximized for the lower one; the solver runs
+  // in minimize mode, so the lower branch flips the sign (step 2.2, section 7).
+  //
+  // Note this replaces a plain sum over the refinement vertices: those vertices
+  // are not uniformly spread over Omega, so their sum is not a measure.
+  Eigen::RowVectorXd c_vec = node_weights_[target_phase].transpose();
+  if (!is_upper) {
+    c_vec = -c_vec;
+  }
 
-    // W(g) is the sampled upper envelope of already computed source-phase
-    // values at the same physical 8D state. Missing candidates are skipped
-    // explicitly; unlike the old global-affine TODO, they are never replaced by
-    // zero because that would silently weaken the boundary condition.
-    double w_g = -std::numeric_limits<double>::infinity();
-    bool has_candidate = false;
-    for (int r = 0; r < switch_cnt; ++r) {
-      for (int theta_end_idx : theta_end_ids) {
-        if (!value_function_.contains(source_phase, r, theta_idx,
-                                      theta_end_idx)) {
-          continue;
-        }
-        std::vector<double> x_src
-            = value_function_.get(source_phase, r, theta_idx, theta_end_idx);
-        if (x_src.size() != static_cast<std::size_t>(source_layout.num_x)) {
-          throw std::runtime_error(
-              "getBorderConditions: source vector has invalid size");
-        }
-        const double val_src
-            = evaluateBarycentricValue(source_phase, x_src, g, kEps);
-        if (!std::isfinite(val_src)) {
-          throw std::runtime_error(
-              "getBorderConditions: non-finite source value");
-        }
-        w_g = std::max(w_g, val_src);
-        has_candidate = true;
-      }
-    }
-
-    if (!has_candidate) {
-      throw std::runtime_error(
-          "getBorderConditions: no source candidates for border point");
-    }
-
+  for (int g_id = 0; g_id < n_points; ++g_id) {
+    // The target-side row maps target barycentric coefficients to the boundary
+    // value at the common-refinement vertex g. Precomputed with the geometry.
+    const SparseVec& phi = phi_at_refinement_[target_phase][g_id];
     appendSparseRow(starts, col_index, value, phi, kEps);
-    row_lower.push_back(w_g);
-    row_upper.push_back(inf);
-    addSparseToObjective(c_vec, phi);
-    phi_rows.push_back(std::move(phi));
-    w_values.push_back(w_g);
+    if (is_upper) {
+      row_lower.push_back(rhs[g_id]);
+      row_upper.push_back(inf);
+    } else {
+      row_lower.push_back(-inf);
+      row_upper.push_back(rhs[g_id]);
+    }
+    phi_rows.push_back(phi);
   }
 
   highs.setOptionValue("solver", "simplex");
@@ -1234,25 +1568,35 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   std::vector<double> x_boundary(solution.col_value.begin(),
                                  solution.col_value.begin() + n_cols);
 
-  double min_overshoot = std::numeric_limits<double>::infinity();
-  double max_overshoot = -std::numeric_limits<double>::infinity();
-  double sum_overshoot = 0.0;
+  // Slack is measured in the direction the bound is supposed to hold:
+  // majorization (value - rhs) for the upper branch, minorization (rhs - value)
+  // for the lower one. Either way it must be nonnegative.
+  double min_slack = std::numeric_limits<double>::infinity();
+  double max_slack = -std::numeric_limits<double>::infinity();
+  double sum_slack = 0.0;
   for (std::size_t i = 0; i < phi_rows.size(); ++i) {
-    const double overshoot = phi_rows[i].dot(x_boundary) - w_values[i];
-    if (overshoot < -10.0 * kHighsSolutionTol) {
+    const double value_at_g = phi_rows[i].dot(x_boundary);
+    const double slack
+        = is_upper ? (value_at_g - rhs[i]) : (rhs[i] - value_at_g);
+    if (slack < -10.0 * kHighsSolutionTol) {
       throw std::runtime_error(
-          "getBorderConditions: border LP violates majorization constraint");
+          is_upper
+              ? "getBorderConditions: border LP violates the majorization "
+                "constraint"
+              : "getBorderConditions: border LP violates the minorization "
+                "constraint");
     }
-    min_overshoot = std::min(min_overshoot, overshoot);
-    max_overshoot = std::max(max_overshoot, overshoot);
-    sum_overshoot += overshoot;
+    min_slack = std::min(min_slack, slack);
+    max_slack = std::max(max_slack, slack);
+    sum_slack += slack;
   }
   logger_->info(
       "Barycentric border LP phase={} source={} theta_idx={} switch_cnt={} "
-      "points={} min_overshoot={} max_overshoot={} mean_overshoot={}",
-      target_phase, source_phase, theta_idx, switch_cnt, phi_rows.size(),
-      min_overshoot, max_overshoot,
-      sum_overshoot / static_cast<double>(phi_rows.size()));
+      "mode={} points={} candidates={} min_slack={} max_slack={} "
+      "mean_slack={}",
+      target_phase, source_phase, theta_idx, switch_cnt,
+      is_upper ? "upper" : "lower", phi_rows.size(), n_candidates, min_slack,
+      max_slack, sum_slack / static_cast<double>(phi_rows.size()));
 
   return x_boundary;
 }
@@ -1279,9 +1623,10 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
   highs->setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
   highs->setOptionValue("log_to_console", highs_verbose_);
 
-  // The barycentric upper-bound LP is specified as maximize sum residuals,
-  // subject to every residual being <= 0.
-  highs->changeObjectiveSense(ObjSense::kMaximize);
+  // The objective is the l1 norm of the residuals measured at the endpoint with
+  // the known value, and it is minimized in both directions: the sign s is
+  // already baked into c_vec by prepareLpMatrices (step 2.1, section 5).
+  highs->changeObjectiveSense(ObjSense::kMinimize);
 
   const double inf = highs->getInfinity();
   std::vector<double> col_lower(n, -inf);
@@ -1337,26 +1682,52 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
 
 void BarycentricAffineApproximator::updateHighsRhsUpperBounds(
     int phase, int solver_index, const std::vector<double>& x_next) {
-  // Only the residual row RHS depends on x_next:
-  //   upper = -g(nu) - phi_{j,nu}^T x_next / dt.
-  // Absolute-value rows and gauge-fixed column bounds remain static.
+  // Only the residual row RHS depends on x_next. Absolute-value rows and
+  // gauge-fixed column bounds remain static.
+  //   Left  row:  upper = -s g(nu)  -  s phi^T x_next / dt   (base + increment)
+  //   Right row:  upper = -s (phi^T x_next + dt beta),
+  //               beta  = q^T m + s rho^T |q| + g(nu),  q = Psi_j x_next.
+  // The modulus lives here and only here: q is built from the known x_next, so
+  // it is a vector of numbers and the LP stays linear (step 2.1, section 3.1).
   const auto& layout = layouts_[phase];
   if (x_next.size() != static_cast<std::size_t>(layout.num_x)) {
     throw std::invalid_argument("updateHighsRhsUpperBounds: x_next size must be "
                                 + std::to_string(layout.num_x));
   }
 
+  const double s = signS();
   const auto& row_lower = row_lowers_[solver_index];
   const auto& base_upper = row_uppers_[solver_index];
   auto& highs_solver = highs_solvers_[solver_index];
   std::vector<double> new_row_upper = base_upper;
 
-  for (const auto& term : rhs_terms_[phase]) {
-    new_row_upper[term.row_id]
-        = base_upper[term.row_id] - term.phi.dot(x_next) / t_delta_;
-    if (std::abs(new_row_upper[term.row_id]) <= kEps) {
-      new_row_upper[term.row_id] = 0.0;
+  // q_j = Psi_j x_next, computed once per region and shared by all Right rows
+  // of that region.
+  const auto& psi_by_region = psi_by_region_[phase];
+  std::vector<Eigen::VectorXd> q(psi_by_region.size());
+  for (std::size_t j = 0; j < psi_by_region.size(); ++j) {
+    q[j] = Eigen::VectorXd::Zero(kSpaceDim);
+    for (int r = 0; r < kSpaceDim; ++r) {
+      q[j](r) = psi_by_region[j].rows[r].dot(x_next);
     }
+  }
+
+  for (const auto& term : rhs_terms_[phase]) {
+    const double phi_x = term.phi.dot(x_next);
+    double upper = 0.0;
+    if (term.kind == RhsKind::Left) {
+      upper = base_upper[term.row_id] - s * phi_x / t_delta_;
+    } else {
+      if (term.region < 0 || term.region >= static_cast<int>(q.size())) {
+        throw std::runtime_error(
+            "updateHighsRhsUpperBounds: Right term has an invalid region id");
+      }
+      const Eigen::VectorXd& qj = q[term.region];
+      const double beta
+          = qj.dot(term.m) + s * term.rho.dot(qj.cwiseAbs()) + term.g;
+      upper = -s * (phi_x + t_delta_ * beta);
+    }
+    new_row_upper[term.row_id] = (std::abs(upper) <= kEps) ? 0.0 : upper;
   }
 
   std::vector<int> row_ids(new_row_upper.size());
@@ -1397,10 +1768,76 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
                              solution.col_value.begin() + num_x);
 }
 
+void BarycentricAffineApproximator::validateStepResiduals(
+    int phase, const std::vector<double>& x_next,
+    const std::vector<double>& z) const {
+  // Recomputes both residuals of the segment straight from the formulas and
+  // checks their sign. This is the end-to-end check of the assembly: if the row
+  // signs, the RHS updates or the psi/phi tables are wrong, it fires here rather
+  // than silently producing a function that is not a bound.
+  //
+  //   F^L = phi^T d + (Psi_j z)^T m       + s rho^T |Psi_j z|       + g(nu)
+  //   F^R = phi^T d + (Psi_j x_next)^T m  + s rho^T |Psi_j x_next|  + g(nu)
+  //   d   = (x_next - z) / dt
+  // Both must satisfy s * F <= 0, i.e. F >= 0 for the lower bound (s = -1) and
+  // F <= 0 for the upper one (s = +1).
+  const double s = signS();
+  const auto& geometry = phase_geometries_[phase];
+  const auto& psi_by_region = psi_by_region_[phase];
+  const auto& A_j_matrs = A_j_matrs_[phase];
+  const auto& f_j_vecs = f_j_vecs_[phase];
+  const auto& Q_c_j_matrs = Q_c_j_matrs_[phase];
+  const auto& q_c_j_vecs = q_c_j_vecs_[phase];
+  const auto& Q_r_j_matrs = Q_r_j_matrs_[phase];
+  const auto& q_r_j_vecs = q_r_j_vecs_[phase];
+  const auto& g_j_vecs = g_j_vecs_[phase];
+  const auto& g_j_scals = g_j_scals_[phase];
+
+  const int n_regions = static_cast<int>(geometry.region_vertices.size());
+  double worst = 0.0;
+  for (int j = 0; j < n_regions; ++j) {
+    Eigen::VectorXd q_left = Eigen::VectorXd::Zero(kSpaceDim);
+    Eigen::VectorXd q_right = Eigen::VectorXd::Zero(kSpaceDim);
+    for (int r = 0; r < kSpaceDim; ++r) {
+      q_left(r) = psi_by_region[j].rows[r].dot(z);
+      q_right(r) = psi_by_region[j].rows[r].dot(x_next);
+    }
+
+    for (const Eigen::VectorXd& nu : geometry.region_vertices[j]) {
+      const SparseVec phi = buildPhiRow(phase, j, nu, kEps);
+      const Eigen::VectorXd m = A_j_matrs[j] * nu + f_j_vecs[j]
+                                + Q_c_j_matrs[j] * nu + q_c_j_vecs[j];
+      Eigen::VectorXd rho = Q_r_j_matrs[j] * nu + q_r_j_vecs[j];
+      rho = rho.cwiseMax(0.0);
+      const double g_nu = g_j_vecs[j].dot(nu) + g_j_scals[j];
+
+      const double slope = (phi.dot(x_next) - phi.dot(z)) / t_delta_;
+      const double f_left = slope + q_left.dot(m)
+                            + s * rho.dot(q_left.cwiseAbs()) + g_nu;
+      const double f_right = slope + q_right.dot(m)
+                             + s * rho.dot(q_right.cwiseAbs()) + g_nu;
+
+      // s * F <= 0 is the requirement; anything above tolerance is a violation.
+      worst = std::max(worst, s * f_left);
+      worst = std::max(worst, s * f_right);
+    }
+  }
+
+  if (worst > kResidualValidationTol) {
+    throw std::runtime_error(
+        "validateStepResiduals: residual has the wrong sign, worst s*F = "
+        + std::to_string(worst));
+  }
+}
+
 std::vector<double> BarycentricAffineApproximator::solveMainLpStep(
     int phase, int solver_index, const std::vector<double>& x_next) {
   updateHighsRhsUpperBounds(phase, solver_index, x_next);
-  return solveLp(phase, solver_index);
+  std::vector<double> z = solveLp(phase, solver_index);
+  if (validate_) {
+    validateStepResiduals(phase, x_next, z);
+  }
+  return z;
 }
 
 void BarycentricAffineApproximator::precomputeMatrices() {
@@ -1424,6 +1861,27 @@ void BarycentricAffineApproximator::precomputeMatrices() {
   for (int phase = 0; phase < kPhases; ++phase) {
     auto [A_j, f_j, Qc_j, qc_j, Qr_j, qr_j, g_j, g0_j]
         = precomputeSystemMatrices(phase);
+    const int n_regions = static_cast<int>(A_j.size());
+    std::size_t n_vertices = 0;
+    for (const auto& verts : phase_geometries_[phase].region_vertices) {
+      n_vertices += verts.size();
+    }
+    if (n_regions == 0) {
+      logger_->info(
+          "precomputeMatrices: phase={}, regions=0, vertices=0 (no system "
+          "matrices)",
+          phase);
+    } else {
+      logger_->info(
+          "precomputeMatrices: phase={}, regions={}, vertices={}, A_j={}x{}, "
+          "f_j={}, Q_c={}x{}, q_c={}, Q_r={}x{}, q_r={}, g_j={}, layout: "
+          "num_x={}, num_y={}, num_cols={}",
+          phase, n_regions, n_vertices, A_j[0].rows(), A_j[0].cols(),
+          f_j[0].size(), Qc_j[0].rows(), Qc_j[0].cols(), qc_j[0].size(),
+          Qr_j[0].rows(), Qr_j[0].cols(), qr_j[0].size(), g_j[0].size(),
+          layouts_[phase].num_x, kSpaceDim * layouts_[phase].num_regions,
+          layouts_[phase].num_cols);
+    }
     A_j_matrs_.push_back(std::move(A_j));
     f_j_vecs_.push_back(std::move(f_j));
     Q_c_j_matrs_.push_back(std::move(Qc_j));
@@ -1438,9 +1896,9 @@ void BarycentricAffineApproximator::precomputeMatrices() {
 
 void BarycentricAffineApproximator::run(const std::string& output_folder_path,
                                         int n_threads) {
-  // This run skeleton intentionally follows the global affine structure, but it
-  // still stops at the border-condition placeholder. The main LP path is
-  // implemented; the full runnable algorithm needs the future border LP.
+  // Follows the global affine structure: geometry once, one HiGHS model per
+  // (phase, worker) reused across the whole backward march, and only row bounds
+  // updated inside it. Both the main LP and the border LP are implemented.
   const std::filesystem::path out_path(output_folder_path);
   if (!std::filesystem::exists(out_path)
       || !std::filesystem::is_directory(out_path)) {
@@ -1456,10 +1914,18 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
 
   logger_->info("Starting barycentric affine approximator");
   getIntersectionPoints();
-  logger_->info("Finished getIntersectionPoints. Got {} areas for phase 0 and {} areas for phase 1", phase_geometries_[0].region_vertices.size(), phase_geometries_[1].region_vertices.size());
+  logger_->info(
+      "Finished getIntersectionPoints. Got {} areas for phase 0 and {} areas "
+      "for phase 1",
+      phase_geometries_[0].region_vertices.size(),
+      phase_geometries_[1].region_vertices.size());
   precomputeMatrices();
-  logger_->info("Finished precomputeMatrices. Precomputed {} system matrices for phase 0 and {} system matrices for phase 1", A_j_matrs_.size(), A_j_matrs_.size());
+  logger_->info(
+      "Finished precomputeMatrices. Precomputed {} system matrices for phase 0 "
+      "and {} system matrices for phase 1",
+      A_j_matrs_[0].size(), A_j_matrs_[1].size());
 
+  logger_->info("Start initializing Highs solvers");
   highs_solvers_.clear();
   row_lowers_.clear();
   row_uppers_.clear();
@@ -1490,11 +1956,17 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
       row_uppers_[solver_index] = std::move(row_upper);
     }
   }
+  logger_->info("Done initializing Highs solvers");
 
   ThreadPool pool(n_threads);
   for (int switch_cnt = 0; switch_cnt <= max_switches_; ++switch_cnt) {
+    logger_->info("Computing value function for switch count {}/{}", switch_cnt,
+                  max_switches_);
     auto theta_range_ids
         = theta_t_index_lists_.expanded_t_by_k_theta[switch_cnt];
+    const std::size_t total_tasks
+        = theta_range_ids.size() * static_cast<std::size_t>(kPhases);
+    std::atomic<std::size_t> completed_tasks{0};
     std::vector<std::future<void>> futures;
     futures.reserve(theta_range_ids.size() * kPhases);
 
@@ -1504,8 +1976,13 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
             = phase * solvers_per_phase
               + (static_cast<int>(theta_idx) % solvers_per_phase);
         futures.push_back(pool.enqueue([this, switch_cnt, phase, theta_idx,
-                                        t_range_ids, solver_index]() {
+                                        t_range_ids, solver_index, total_tasks,
+                                        &completed_tasks]() {
           const double theta = t_range_[theta_idx];
+          logger_->info(
+              "Starting computation for theta_idx: {}, phase: {}, switch_cnt: "
+              "{}",
+              theta_idx, phase, switch_cnt);
           std::lock_guard<std::mutex> lock(*solver_mutexes_[solver_index]);
           std::vector<double> x_next;
 
@@ -1529,19 +2006,35 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
             value_function_.set(phase, switch_cnt, t_idx, theta_idx, x_next,
                                 static_cast<std::size_t>(
                                     layouts_[phase].num_x));
+            auto [min_it, max_it]
+                = std::minmax_element(x_next.begin(), x_next.end());
+            const double min_val = min_it == x_next.end() ? 0.0 : *min_it;
+            const double max_val = max_it == x_next.end() ? 0.0 : *max_it;
+            logger_->info(
+                "Value function min/max at t_idx: {}, theta_idx: {}, phase: "
+                "{}, switch_cnt: {}: \t{:.4f}\t{:.4f}",
+                t_idx, theta_idx, phase, switch_cnt, min_val, max_val);
           }
+          const std::size_t done = completed_tasks.fetch_add(1) + 1;
+          logger_->info(
+              "Finished computation for theta_idx: {}, phase: {}, switch_cnt: "
+              "{} ({}/{})",
+              theta_idx, phase, switch_cnt, done, total_tasks);
         }));
       }
     }
     for (auto& f : futures) {
       f.get();
     }
+    logger_->info("Completed switch count {}/{}", switch_cnt, max_switches_);
   }
 
   const std::filesystem::path base(output_folder_path);
+  logger_->info("Saving barycentric value function artifacts to {}", base.string());
   value_function_.dumpToJson((base / "value_function.json").string());
   hcpwa::util::dumpVectorToJson(t_range_, (base / "t_range.json").string());
   dumpInitParamsToJson((base / "init_params.json").string());
+  logger_->info("Finished barycentric affine approximator run");
 }
 
 }  // namespace barycentric_affine_approximator

@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "interval_building.hpp"
+#include "util/block_reduction_lp.hpp"
 #include "util/value_function_utils.hpp"
 
 // Keep the same public naming style as the existing GlobalAffineApproximator so
@@ -42,6 +43,12 @@ constexpr double kGeomEps = 1e-8;
 // HiGHS feasibility tolerance, otherwise the check would fire on solutions that
 // the solver legitimately reports as optimal.
 constexpr double kResidualValidationTol = 1e-4;
+
+// Weight of the tie-break term epsilon * ||z||_1 in the main-step objective.
+// Small enough that it only chooses among points the LP already considers
+// optimal, large enough to survive the solver's own feasibility tolerance of
+// 1e-6.
+constexpr double kTieBreakEpsilon = 1e-8;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 
@@ -91,41 +98,10 @@ struct SparseVec {
   double dot(const std::vector<double>& x) const;
 };
 
-// Sparse representation of Psi_j in the formula grad V = Psi_j x. There are
-// exactly 8 rows because the state dimension is fixed at m = 8 in the paper and
-// in this codebase.
-struct SparsePsi {
-  std::array<SparseVec, kSpaceDim> rows;
-};
-
-// Which endpoint of the time segment [t_{k-1}, t_k] a residual row controls.
-// Both endpoints are required: the slope is constant on the segment, but the
-// value x(t) varies, and the residual depends on the value through
-// q_j = Psi_j x(t). Controlling one endpoint only leaves the condition violated
-// on the rest of the segment (step 2.1, section 2.2).
-enum class RhsKind {
-  // Endpoint with the unknown value z = x_{k-1}. The modulus |Psi_j z| is taken
-  // at the unknown, hence the y-lift.
-  Left,
-  // Endpoint with the known value x_next. The modulus is a number there, so the
-  // row carries no y block and the whole RHS is arithmetic.
-  Right,
-};
-
-// One residual row together with everything needed to recompute its RHS after
-// x_next changes. Left rows need only phi; Right rows also need the per-(j,nu)
-// data entering beta = q^T m + s rho^T |q| + g with q = Psi_j x_next.
-struct ResidualRhsTerm {
-  int row_id = 0;
-  RhsKind kind = RhsKind::Left;
-  SparseVec phi;
-
-  // Used by RhsKind::Right only.
-  int region = -1;
-  Eigen::VectorXd m;    // A_j nu + f_j + c_j(nu)
-  Eigen::VectorXd rho;  // radius of the disturbance box at nu
-  double g = 0.0;       // g_i(nu)
-};
+// The 8-row SparsePsi and the per-full-region ResidualRhsTerm that used to be
+// declared here are gone. Psi is now stored per block region with coord_count
+// rows (hcpwa::util::block_lp::BlockPsi), and the per-row right-hand-side data
+// lives in the assembled reduced LP as block_lp::RhsTerm.
 
 // Barycentric coordinates on one 2D simplex:
 //   alpha(z) = H z + h,
@@ -145,12 +121,69 @@ struct ProjectionLayer {
   std::vector<TriangleBasis> bases;
 };
 
-// Geometry for one phase. A full 8D region stores both its vertices and the
-// five triangle ids used to select the local barycentric charts.
+// Number of coordinate blocks per phase: A, B, C.
+constexpr int kBlockCount = hcpwa::util::block_lp::kBlockCount;
+
+// Geometry of one coordinate block of one phase.
+//
+// The five projection planes of a phase split into three groups sharing no
+// coordinate, so an 8D region is the Cartesian product of three low-dimensional
+// block polytopes (step 7, Lemma 1). Carrying the three block vertex sets
+// instead of materialising the product is what makes the correct geometry
+// affordable: the product has 108-192 vertices per region across 1.36M
+// regions, the blocks have about 509 regions in total.
+struct BlockGeometry {
+  std::array<int, 3> coords{};     // state coordinates, ascending
+  int coord_count = 0;             // 3 for A and B, 2 for C
+  std::array<int, 2> layer_ids{};  // indices into PhaseGeometry::layers
+  int layer_count = 0;             // 2 for A and B, 1 for C
+
+  // local_axis[l][k] is the position within `coords` of the k-th axis of this
+  // block's l-th layer, where l runs over 0..layer_count-1.
+  //
+  // Two of the six entries are NOT contiguous: block B of phase 0 has layer 3
+  // on axes (1,6) inside coords (1,3,6), giving (0,2), and block B' of phase 1
+  // has layer 2 on axes (3,7) inside coords (3,5,7), also giving (0,2).
+  // Assuming (0,1) then (1,2) uniformly is wrong in exactly those two places
+  // and produces a silently wrong phi rather than a crash, so this table is
+  // derived by searching projectionAxesForPhase() and then asserted. It is
+  // never written down as a constant in production code.
+  std::array<std::array<int, 2>, 2> local_axis{};
+
+  int num_regions = 0;
+  std::vector<std::array<int, 2>> triangle_ids;
+  // Per block region, all vertices, each of length coord_count.
+  std::vector<std::vector<Eigen::VectorXd>> vertices;
+
+  // Per block region, filled by precomputeSystemMatrices(). All restricted to
+  // the block's own coordinates, so the matrices are coord_count square rather
+  // than 8x8.
+  std::vector<hcpwa::util::block_lp::BlockPsi> psi;
+  std::vector<Eigen::MatrixXd> a_matr;
+  std::vector<Eigen::VectorXd> f_vec;
+  std::vector<Eigen::MatrixXd> q_c_matr;
+  std::vector<Eigen::VectorXd> q_c_vec;
+  std::vector<Eigen::MatrixXd> q_r_matr;
+  std::vector<Eigen::VectorXd> q_r_vec;
+  std::vector<Eigen::VectorXd> g_vec;
+  std::vector<double> g_scal;
+};
+
+// Geometry for one phase.
+//
+// region_vertices is no longer populated: the 8D vertex lists it used to hold
+// were truncated to 12 of an area's 108-192 vertices, and this path now works
+// from `blocks` instead. region_triangle_ids survives because the border path
+// indexes areas by their five simplex ids.
 struct PhaseGeometry {
   std::array<ProjectionLayer, kSubsystemCount> layers;
-  std::vector<std::vector<Eigen::VectorXd>> region_vertices;
   std::vector<std::array<int, kSubsystemCount>> region_triangle_ids;
+  std::array<BlockGeometry, kBlockCount> blocks;
+
+  // Number of 8D regions, i.e. M_A * M_B * M_C. Region ids run in the order
+  //   region = (j_A * M_B + j_B) * M_C + j_C
+  // which is the order the geometry pipeline assembles them in.
+  int num_regions = 0;
 };
 
 // One nonempty cell of the common refinement Omega_0^(j0) cap Omega_1^(j1).
@@ -164,19 +197,22 @@ struct RefinementCell {
   std::vector<int> vertex_ids;
 };
 
-// Layout of the LP variable vector:
-//   Y = [x; y_0; y_1; ...; y_{M-1}],
-// where x contains all unique 2D barycentric vertex values and y_j is the
-// 8-vector auxiliary for |Psi_j x| in full region j.
+// Layout of the x block of the LP variable vector: all unique 2D barycentric
+// vertex values, grouped by projection layer.
+//
+// The y and mu columns are NOT described here. They belong to the reduced LP
+// and are laid out by hcpwa::util::block_lp::ReducedLp, which owns
+//   [ x | y_A | y_B | y_C | muR | muL ].
+// The old num_regions and idxY(region, dim) fields, which indexed one
+// 8-vector per full 8D region, are deliberately deleted rather than
+// repurposed: leaving them in place would let a missed call site keep
+// compiling while indexing a layout that no longer exists.
 struct BarycentricVarLayout {
   std::array<int, kSubsystemCount> eta_s{};
   std::array<int, kSubsystemCount> offset_s{};
   int num_x = 0;
-  int num_regions = 0;
-  int num_cols = 0;
 
   int idxX(int subsystem, int vertex_id) const;
-  int idxY(int region, int dim) const;
 };
 
 class BarycentricAffineApproximator {
@@ -214,28 +250,41 @@ class BarycentricAffineApproximator {
   // its phi row on each call would repeat the same work thousands of times.
   std::array<std::vector<SparseVec>, kPhases> phi_at_refinement_;
 
-  std::vector<std::vector<Eigen::MatrixXd>> A_j_matrs_;
-  std::vector<std::vector<Eigen::VectorXd>> f_j_vecs_;
-  std::vector<std::vector<Eigen::MatrixXd>> Q_c_j_matrs_;
-  std::vector<std::vector<Eigen::VectorXd>> q_c_j_vecs_;
-  std::vector<std::vector<Eigen::MatrixXd>> Q_r_j_matrs_;
-  std::vector<std::vector<Eigen::VectorXd>> q_r_j_vecs_;
-  std::vector<std::vector<Eigen::VectorXd>> g_j_vecs_;
-  std::vector<std::vector<double>> g_j_scals_;
+  // The per-region CTM matrices used to live here as eight parallel vectors
+  // indexed by full region. They are now per block region and live inside
+  // PhaseGeometry::blocks, alongside the geometry they are derived from.
 
-  std::array<std::vector<ResidualRhsTerm>, kPhases> rhs_terms_;
-  std::array<std::vector<SparsePsi>, kPhases> psi_by_region_;
+  // The assembled reduced LP per phase. Owns the constraint matrix, the
+  // objective, the column layout and the per-row data needed to refresh the
+  // right-hand sides when x_next changes.
+  std::array<hcpwa::util::block_lp::ReducedLp, kPhases> reduced_lps_;
 
   std::shared_ptr<spdlog::logger> logger_;
   std::vector<std::unique_ptr<Highs>> highs_solvers_;
   std::vector<std::vector<double>> row_lowers_;
-  std::vector<std::vector<double>> row_uppers_;
   std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
   interval_building::ThetaTIndexLists theta_t_index_lists_;
 
   SparseVec buildPhiRow(int phase, int region, const Eigen::VectorXd& point,
                         double tolerance = kEps) const;
+
+  // phi restricted to one block, evaluated at a block vertex.
+  //
+  // Rows are built blockwise but columns stay global: the entries land in the
+  // same x columns as buildPhiRow() would put them, via idxX(layer_id, ...).
+  // Mixing block-local and global column order is the classic way to get this
+  // wrong, so the block index never reaches a column.
+  SparseVec buildPhiRowBlock(int phase, int block_id, int j_block,
+                             const Eigen::VectorXd& nu_block,
+                             double tolerance = kEps) const;
+
+  // Checks the block geometry invariants that do not need an LP: vertex counts,
+  // every block vertex lying inside its own selected simplices, and each
+  // block's phi summing to its layer count with no negative entries. Called
+  // from getIntersectionPoints(); costs O(sum of block vertex counts), about
+  // 3.5e3 rows on the production geometry.
+  void validateBlockGeometry(int phase) const;
 
   std::vector<int> locateRegions(int phase, const Eigen::VectorXd& point,
                                  double tolerance = kEps) const;
@@ -257,9 +306,22 @@ class BarycentricAffineApproximator {
   // Called at the end of getIntersectionPoints(), once layouts_ are known.
   void computeNodeWeights();
 
-  // Recomputes both endpoint residuals of one segment directly from the
-  // formulas and checks their sign. Guarded by validate_ because it costs a full
-  // pass over all (region, vertex) pairs.
+  // Tier-3 check: is the constructed function actually a bound?
+  //
+  // Samples random triples (a,b,c) from R_A x R_B x R_C and verifies the
+  // ORIGINAL condition s*F(a,b,c) <= 0 at both endpoints of the segment, using
+  // F = F_A + F_B + F_C (step 7, Lemma 2). This is the property the whole
+  // construction exists to provide, and checking it directly is the only
+  // verification available: the production product LP is unsolvable, so there
+  // is no second implementation to diff against.
+  //
+  // It is also the check that would have caught the vertex truncation at once.
+  // Under truncation only 12 of an area's 108-192 vertices were constrained,
+  // so almost any sampled triple lands outside the enforced set and shows
+  // s*F > 0.
+  //
+  // Cost is O(1) per triple with no LP and no 8D vertex, so the sample can be
+  // large. Guarded by validate_.
   void validateStepResiduals(int phase, const std::vector<double>& x_next,
                              const std::vector<double>& z) const;
 
@@ -285,24 +347,38 @@ class BarycentricAffineApproximator {
   std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd> getFIJMinResolution(
       int i, int j, const Eigen::VectorXd& n) const;
 
-  Eigen::VectorXd areaCentroidCoords(int j, int phase) const;
+  // Expands a block point into an 8-vector, padding the coordinates outside
+  // the block with NaN. See the definition for why NaN and not zero.
+  Eigen::VectorXd blockPointToFullState(int phase, int block_id,
+                                        const Eigen::VectorXd& nu_block) const;
 
+  // Centroid of one block region, computed from its own COMPLETE vertex set.
+  //
+  // This is the representative point at which each min branch is resolved. The
+  // old whole-region centroid averaged a truncated vertex set whose hull was
+  // segment x segment x triangle, a 4-dimensional slice of an 8-dimensional
+  // region; midpoints of two vertices sharing a facet land on the region
+  // boundary, where the min is tied, so branch resolution was being decided in
+  // the kEps tie window or throwing outright. Complete per-block vertex sets
+  // fix that as a side effect.
+  Eigen::VectorXd blockCentroidCoords(int phase, int block_id,
+                                      int j_block) const;
+
+  // A, f, g restricted to one block, resolved at that block region's centroid.
   std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-  getAMatrFVecGVecAndGScalJ(int j, int phase) const;
+  getBlockAMatrFVecGVecAndGScalJ(int phase, int block_id, int j_block) const;
 
+  // Disturbance-box centre and radius maps restricted to one block.
   std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd,
              Eigen::VectorXd>
-  getQQForArea(int j, int phase) const;
+  getBlockQQ(int phase, int block_id, int j_block) const;
 
-  std::tuple<std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-             std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-             std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-             std::vector<Eigen::VectorXd>, std::vector<double>>
-  precomputeSystemMatrices(int phase);
+  // Fills the per-block-region Psi and CTM data in phase_geometries_[phase].
+  void precomputeSystemMatrices(int phase);
 
-  std::tuple<std::vector<int>, std::vector<int>, std::vector<double>,
-             std::vector<double>, std::vector<double>, Eigen::RowVectorXd>
-  prepareLpMatrices(int phase);
+  // Assembles the reduced LP of step 7 section 10 for one phase: three block
+  // loops emitting (R), (L) and (Y) rows, then the two (Sigma) coupling rows.
+  hcpwa::util::block_lp::ReducedLp prepareLpMatrices(int phase);
 
   std::vector<double> getBorderConditions(int switch_phase, int theta_idx,
                                           double theta, int switch_cnt) const;

@@ -28,9 +28,14 @@ hcpwa::LineSet<8> MakeUniformBoxPrism(double min_value, double max_value) {
   return hcpwa::AABBBounds(box);
 }
 
-std::vector<hcpwa::Vec<8>> MakeAreaBoundsVertices(double min_value,
-                                                  double max_value) {
-  return {MakeUniformVec8(min_value), MakeUniformVec8(max_value)};
+// The common refinement takes per-area boxes directly now, instead of deriving
+// them from 8D area vertex lists, so the old MakeAreaBoundsVertices() helper is
+// gone and the boxes are stated outright.
+hcpwa::AreaBounds8d MakeAreaBounds(double min_value, double max_value) {
+  hcpwa::AreaBounds8d bounds;
+  bounds.min.fill(min_value);
+  bounds.max.fill(max_value);
+  return bounds;
 }
 
 }  // namespace
@@ -313,17 +318,17 @@ TEST(user_algo, common_refinement_box_filter_rejects_non_volume_pairs) {
       = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
   const std::vector<std::vector<size_t>> phase1_area_prism_indices
       = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
-      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(3.0, 4.0)};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
-      = {MakeAreaBoundsVertices(0.5, 1.5), MakeAreaBoundsVertices(4.0, 5.0)};
+  const std::vector<hcpwa::AreaBounds8d> phase0_area_bounds
+      = {MakeAreaBounds(0.0, 1.0), MakeAreaBounds(3.0, 4.0)};
+  const std::vector<hcpwa::AreaBounds8d> phase1_area_bounds
+      = {MakeAreaBounds(0.5, 1.5), MakeAreaBounds(4.0, 5.0)};
 
   hcpwa::CommonRefinementResult result
       = hcpwa::compute_common_refinement_area_vertices(
           phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
           phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
           phase0_area_prism_indices, phase1_area_prism_indices,
-          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
+          phase0_area_bounds, phase1_area_bounds, /*N=*/10.0,
           /*verbose=*/false);
 
   ASSERT_EQ(result.areas.size(), 1U);
@@ -356,18 +361,23 @@ TEST(user_algo, common_refinement_box_filter_is_canonical_and_unique) {
       = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}, {2, 2, 2, 2, 2}};
   const std::vector<std::vector<size_t>> phase1_area_prism_indices
       = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
-      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(0.5, 1.5),
-         MakeAreaBoundsVertices(2.0, 2.0)};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
-      = {MakeAreaBoundsVertices(0.25, 0.75), MakeAreaBoundsVertices(0.75, 1.25)};
+  // The third phase-0 box is deliberately degenerate: it has zero width in
+  // every coordinate, so has_positive_width must discard it and the result must
+  // be the four pairs among the two non-degenerate boxes rather than six. That
+  // filter is the mechanism that silently emptied the common refinement when
+  // the boxes were derived from truncated vertex lists, so it stays tested.
+  const std::vector<hcpwa::AreaBounds8d> phase0_area_bounds
+      = {MakeAreaBounds(0.0, 1.0), MakeAreaBounds(0.5, 1.5),
+         MakeAreaBounds(2.0, 2.0)};
+  const std::vector<hcpwa::AreaBounds8d> phase1_area_bounds
+      = {MakeAreaBounds(0.25, 0.75), MakeAreaBounds(0.75, 1.25)};
 
   hcpwa::CommonRefinementResult result
       = hcpwa::compute_common_refinement_area_vertices(
           phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
           phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
           phase0_area_prism_indices, phase1_area_prism_indices,
-          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
+          phase0_area_bounds, phase1_area_bounds, /*N=*/10.0,
           /*verbose=*/false);
 
   ASSERT_EQ(result.areas.size(), 4U);

@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -216,30 +217,102 @@ void GlobalAffineApproximator::getIntersectionPoints() {
           system_params_.b36, system_params_.b24, system_params_.b27,
           system_params_.f2min, system_params_.f3min, system_params_.f5min,
           system_params_.f8min, system_params_.f2max, system_params_.f3max,
-          system_params_.f5max, system_params_.f8max);
+          system_params_.f5max, system_params_.f8max,
+          // The 8D area vertex lists are the truncated ones -- 12 of an area's
+          // 108-192 vertices -- and this path no longer uses them: it carries
+          // the three block vertex sets instead. Materialising them correctly
+          // would cost about 13 GB; the block data is under 1 MB.
+          hcpwa::TriangleAreasOptions{.build_8d_regions = false});
 
-  intersection_points_.resize(2);
-
-  auto convert_phase = [](const std::vector<std::vector<hcpwa::Vec<8>>>& src,
-                          std::vector<std::vector<Eigen::VectorXd>>& dst) {
-    dst.resize(src.size());
-    for (int a = 0; a < src.size(); ++a) {
-      const auto& area = src[a];
-      dst[a].resize(area.size());
-      for (int v = 0; v < area.size(); ++v) {
-        Eigen::VectorXd vec(kSpaceDim);
-        for (int i = 0; i < kSpaceDim; ++i) {
-          vec(i) = static_cast<double>(area[v][i]);
-        }
-        dst[a][v] = std::move(vec);
+  auto ingest = [](int phase, int block_id, const hcpwa::BlockRegions& src) {
+    GlobalBlockGeometry block;
+    block.coords = src.coords;
+    block.coord_count = src.coord_count;
+    block.num_regions = static_cast<int>(src.vertices.size());
+    if (block.coord_count < 2 || block.coord_count > 3) {
+      throw std::runtime_error(
+          "getIntersectionPoints: block has an unexpected coord_count");
+    }
+    for (int d = 0; d < block.coord_count; ++d) {
+      if (block.coords[d] < 0 || block.coords[d] >= kSpaceDim) {
+        throw std::runtime_error(
+            "getIntersectionPoints: block coordinate out of range");
+      }
+      if (d > 0 && block.coords[d] <= block.coords[d - 1]) {
+        throw std::runtime_error(
+            "getIntersectionPoints: block coordinates are not ascending");
       }
     }
+    block.vertices.reserve(block.num_regions);
+    for (int j = 0; j < block.num_regions; ++j) {
+      // A stored block polytope is full dimensional, so it has at least three
+      // vertices. Block C is a plane cell, which may be a general polygon on
+      // this path rather than a triangle.
+      if (src.vertices[j].size() < 3) {
+        throw std::runtime_error(
+            "getIntersectionPoints: block region has fewer than 3 vertices");
+      }
+      std::vector<Eigen::VectorXd> vertices;
+      vertices.reserve(src.vertices[j].size());
+      for (const auto& vertex : src.vertices[j]) {
+        Eigen::VectorXd point(block.coord_count);
+        for (int d = 0; d < block.coord_count; ++d) {
+          point(d) = static_cast<double>(vertex[d]);
+        }
+        vertices.push_back(std::move(point));
+      }
+      block.vertices.push_back(std::move(vertices));
+    }
+    return block;
   };
 
-  convert_phase(areas_vertices.intersection_points_phase0,
-                intersection_points_[0]);
-  convert_phase(areas_vertices.intersection_points_phase1,
-                intersection_points_[1]);
+  for (int b = 0; b < kBlockCount; ++b) {
+    blocks_[0][b] = ingest(0, b, areas_vertices.blocks_phase0[b]);
+    blocks_[1][b] = ingest(1, b, areas_vertices.blocks_phase1[b]);
+  }
+
+  for (int phase = 0; phase < 2; ++phase) {
+    // The three blocks must partition the eight state coordinates; otherwise
+    // the LP rows would not separate and the reduction would be invalid.
+    std::array<int, kSpaceDim> coordinate_uses{};
+    long long product = 1;
+    for (int b = 0; b < kBlockCount; ++b) {
+      const auto& block = blocks_[phase][b];
+      product *= block.num_regions;
+      for (int d = 0; d < block.coord_count; ++d) {
+        ++coordinate_uses[block.coords[d]];
+      }
+    }
+    for (int r = 0; r < kSpaceDim; ++r) {
+      if (coordinate_uses[r] != 1) {
+        throw std::runtime_error(std::format(
+            "getIntersectionPoints: phase {} coordinate {} is claimed by {} "
+            "blocks, expected exactly 1",
+            phase, r, coordinate_uses[r]));
+      }
+    }
+    const std::size_t area_count
+        = phase == 0 ? areas_vertices.intersection_prism_indices_phase0.size()
+                     : areas_vertices.intersection_prism_indices_phase1.size();
+    if (product != static_cast<long long>(area_count)) {
+      throw std::runtime_error(std::format(
+          "getIntersectionPoints: phase {} has {} areas but M_A*M_B*M_C = {}",
+          phase, area_count, product));
+    }
+    num_regions_[phase] = static_cast<int>(area_count);
+
+    std::size_t block_rows = 0;
+    for (int b = 0; b < kBlockCount; ++b) {
+      for (const auto& vertices : blocks_[phase][b].vertices) {
+        block_rows += vertices.size();
+      }
+    }
+    logger_->info(
+        "getIntersectionPoints: phase={}, M_A={}, M_B={}, M_C={}, areas={}, "
+        "block rows R_A+R_B+R_C={}",
+        phase, blocks_[phase][0].num_regions, blocks_[phase][1].num_regions,
+        blocks_[phase][2].num_regions, num_regions_[phase], block_rows);
+  }
 }
 
 std::pair<Eigen::RowVectorXd, Eigen::RowVectorXd>
@@ -283,403 +356,409 @@ GlobalAffineApproximator::getFIJMinResolution(int i, int j,
   return std::make_pair(f_matr_row, f_vec_row);
 }
 
-Eigen::VectorXd GlobalAffineApproximator::areaCentroidCoords(int j,
-                                                             int phase) const {
-  // Check if intersection_points are computed for given phase
-  if (intersection_points_.empty() || phase < 0
-      || phase >= static_cast<int>(intersection_points_.size())
-      || intersection_points_[phase].empty()) {
-    throw std::runtime_error(
-        "Intersection points are not computed for the specified phase. "
-        "Please "
-        "compute intersection points before calling areaCentroidCoords.");
+Eigen::VectorXd GlobalAffineApproximator::blockCentroidCoords(
+    int phase, int block_id, int j_block) const {
+  if (phase < 0 || phase >= 2 || block_id < 0 || block_id >= kBlockCount) {
+    throw std::invalid_argument("blockCentroidCoords: invalid phase or block");
   }
-  const std::vector<std::vector<Eigen::VectorXd>>& intersection_points_per_phase
-      = intersection_points_[phase];
-  if (j < 0 || j >= static_cast<int>(intersection_points_per_phase.size())) {
-    throw std::invalid_argument("Invalid area index j in areaCentroidCoords");
+  const auto& block = blocks_[phase][block_id];
+  if (j_block < 0 || j_block >= block.num_regions) {
+    throw std::invalid_argument("blockCentroidCoords: invalid block region id");
   }
-
-  const auto& area = intersection_points_per_phase[j];
-  if (area.empty()) {
-    throw std::invalid_argument("Area is empty in areaCentroidCoords");
+  const auto& vertices = block.vertices[j_block];
+  if (vertices.empty()) {
+    throw std::runtime_error("blockCentroidCoords: block region has no "
+                             "vertices");
   }
-
-  Eigen::VectorXd centroid = Eigen::VectorXd::Zero(kSpaceDim);
-  for (const auto& point : area) {
-    centroid += point;
+  Eigen::VectorXd centroid = Eigen::VectorXd::Zero(block.coord_count);
+  for (const auto& vertex : vertices) {
+    centroid += vertex;
   }
-  centroid /= static_cast<double>(area.size());
-
-  hcpwa::util::assertShape(centroid, kSpaceDim);
+  centroid /= static_cast<double>(vertices.size());
   return centroid;
 }
 
+// Expands a block centroid into a full 8-vector for getFIJMinResolution().
+//
+// Coordinates outside the block are NaN on purpose. Each block's flows read
+// only that block's own coordinates -- phase 0 block A resolves f31 and f36
+// over {0,2,5}, block B resolves f24 and f27 over {1,3,6} -- so the padding is
+// never read. If it ever were, every comparison in getFIJMinResolution() would
+// evaluate false and the function would throw rather than silently resolve a
+// branch against a made-up value.
+Eigen::VectorXd GlobalAffineApproximator::blockPointToFullState(
+    int phase, int block_id, const Eigen::VectorXd& nu) const {
+  const auto& block = blocks_[phase][block_id];
+  Eigen::VectorXd full = Eigen::VectorXd::Constant(
+      kSpaceDim, std::numeric_limits<double>::quiet_NaN());
+  for (int d = 0; d < block.coord_count; ++d) {
+    full(block.coords[d]) = nu(d);
+  }
+  return full;
+}
+
 std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-GlobalAffineApproximator::getAMatrFVecGVecAndGScalJ(int j, int phase) const {
-  Eigen::VectorXd n = areaCentroidCoords(j, phase);
+GlobalAffineApproximator::getBlockAMatrFVecGVecAndGScalJ(int phase,
+                                                         int block_id,
+                                                         int j_block) const {
+  // The same CTM branch resolution as before, restricted to one block. A^(j) is
+  // block diagonal with respect to the coordinate partition, so the restriction
+  // loses nothing; restrict_row() asserts that by refusing any entry outside
+  // the block. Block C is purely exogenous in both phases, so its A, f and g
+  // are zero.
+  const auto& block = blocks_[phase][block_id];
+  const int c = block.coord_count;
+  const Eigen::VectorXd nu = blockCentroidCoords(phase, block_id, j_block);
+  const Eigen::VectorXd n = blockPointToFullState(phase, block_id, nu);
 
-  Eigen::MatrixXd a_matr;
-  Eigen::VectorXd b_vec;
-  Eigen::VectorXd g_vec;
-  double g_scal;
-
-  if (phase == 0) {
-    auto [f31_matr_row, f31_vec_row] = getFIJMinResolution(3 - 1, 1 - 1, n);
-    auto [f36_matr_row, f36_vec_row] = getFIJMinResolution(3 - 1, 6 - 1, n);
-    auto [f24_matr_row, f24_vec_row] = getFIJMinResolution(2 - 1, 4 - 1, n);
-    auto [f27_matr_row, f27_vec_row] = getFIJMinResolution(2 - 1, 7 - 1, n);
-
-    // Build A_matr: SPACE_DIM x SPACE_DIM
-    a_matr.resize(kSpaceDim, kSpaceDim);
-    a_matr.row(0) = f31_matr_row;
-    a_matr.row(1) = -f24_matr_row - f27_matr_row;
-    a_matr.row(2) = -f31_matr_row - f36_matr_row;
-    a_matr.row(3) = f24_matr_row;
-    a_matr.row(4) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(5) = f36_matr_row;
-    a_matr.row(6) = f27_matr_row;
-    a_matr.row(7) = Eigen::RowVectorXd::Zero(kSpaceDim);
-
-    // Build b_vec: SPACE_DIM x 1
-    b_vec.resize(kSpaceDim);
-    b_vec(0) = f31_vec_row(0);
-    b_vec(1) = -f24_vec_row(0) - f27_vec_row(0);
-    b_vec(2) = -f31_vec_row(0) - f36_vec_row(0);
-    b_vec(3) = f24_vec_row(0);
-    b_vec(4) = 0.0;
-    b_vec(5) = f36_vec_row(0);
-    b_vec(6) = f27_vec_row(0);
-    b_vec(7) = 0.0;
-
-    // Build g_vec: SPACE_DIM x 1
-    g_vec = (f31_matr_row + f36_matr_row + f24_matr_row + f27_matr_row)
-                .transpose();
-
-    // Build g_scal: scalar
-    g_scal = f31_vec_row(0) + f36_vec_row(0) + f24_vec_row(0) + f27_vec_row(0);
-  } else if (phase == 1) {
-    auto [f51_matr_row, f51_vec_row] = getFIJMinResolution(5 - 1, 1 - 1, n);
-    auto [f57_matr_row, f57_vec_row] = getFIJMinResolution(5 - 1, 7 - 1, n);
-    auto [f84_matr_row, f84_vec_row] = getFIJMinResolution(8 - 1, 4 - 1, n);
-    auto [f86_matr_row, f86_vec_row] = getFIJMinResolution(8 - 1, 6 - 1, n);
-
-    // Build A_matr: SPACE_DIM x SPACE_DIM
-    a_matr.resize(kSpaceDim, kSpaceDim);
-    a_matr.row(0) = f51_matr_row;
-    a_matr.row(1) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(2) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(3) = f84_matr_row;
-    a_matr.row(4) = -f51_matr_row - f57_matr_row;
-    a_matr.row(5) = f86_matr_row;
-    a_matr.row(6) = f57_matr_row;
-    a_matr.row(7) = -f84_matr_row - f86_matr_row;
-
-    // Build b_vec: SPACE_DIM x 1
-    b_vec.resize(kSpaceDim);
-    b_vec(0) = f51_vec_row(0);
-    b_vec(1) = 0.0;
-    b_vec(2) = 0.0;
-    b_vec(3) = f84_vec_row(0);
-    b_vec(4) = -f51_vec_row(0) - f57_vec_row(0);
-    b_vec(5) = f86_vec_row(0);
-    b_vec(6) = f57_vec_row(0);
-    b_vec(7) = -f84_vec_row(0) - f86_vec_row(0);
-
-    // Build g_vec: SPACE_DIM x 1
-    g_vec = (f51_matr_row + f57_matr_row + f84_matr_row + f86_matr_row)
-                .transpose();
-
-    // Build g_scal: scalar
-    g_scal = f51_vec_row(0) + f57_vec_row(0) + f84_vec_row(0) + f86_vec_row(0);
-  } else {
-    std::ostringstream oss;
-    oss << "No such phase: " << phase;
-    throw std::invalid_argument(oss.str());
+  Eigen::MatrixXd a_matr = Eigen::MatrixXd::Zero(c, c);
+  Eigen::VectorXd b_vec = Eigen::VectorXd::Zero(c);
+  Eigen::VectorXd g_vec = Eigen::VectorXd::Zero(c);
+  double g_scal = 0.0;
+  if (block_id == 2) {
+    return std::make_tuple(a_matr, b_vec, g_vec, g_scal);
   }
 
-  hcpwa::util::assertShape(b_vec, kSpaceDim);
-  hcpwa::util::assertShape(a_matr, kSpaceDim, kSpaceDim);
-  hcpwa::util::assertShape(g_vec, kSpaceDim);
-  hcpwa::util::assertScalar(g_scal);
+  auto restrict_row = [&](const Eigen::RowVectorXd& row) {
+    Eigen::RowVectorXd out = Eigen::RowVectorXd::Zero(c);
+    std::array<bool, kSpaceDim> in_block{};
+    for (int d = 0; d < c; ++d) {
+      in_block[block.coords[d]] = true;
+      out(d) = row(block.coords[d]);
+    }
+    for (int r = 0; r < kSpaceDim; ++r) {
+      if (!in_block[r] && row(r) != 0.0) {
+        throw std::runtime_error(std::format(
+            "getBlockAMatrFVecGVecAndGScalJ: phase {} block {} region {} has a "
+            "flow coefficient {} on coordinate {}, outside the block. A^(j) is "
+            "supposed to be block diagonal.",
+            phase, block_id, j_block, row(r), r));
+      }
+    }
+    return out;
+  };
 
+  // Phase 0: block A holds n1, n3, n6 with flows f31, f36; block B holds
+  // n2, n4, n7 with f24, f27. Phase 1: block A' holds n1, n5, n7 with f51,
+  // f57; block B' holds n4, n6, n8 with f84, f86. Both flows of a block share
+  // its source cell.
+  int first_i = 0, first_j = 0, second_i = 0, second_j = 0;
+  if (phase == 0 && block_id == 0) {
+    first_i = 3 - 1;  first_j = 1 - 1;
+    second_i = 3 - 1; second_j = 6 - 1;
+  } else if (phase == 0 && block_id == 1) {
+    first_i = 2 - 1;  first_j = 4 - 1;
+    second_i = 2 - 1; second_j = 7 - 1;
+  } else if (phase == 1 && block_id == 0) {
+    first_i = 5 - 1;  first_j = 1 - 1;
+    second_i = 5 - 1; second_j = 7 - 1;
+  } else if (phase == 1 && block_id == 1) {
+    first_i = 8 - 1;  first_j = 4 - 1;
+    second_i = 8 - 1; second_j = 6 - 1;
+  } else {
+    throw std::invalid_argument(
+        "getBlockAMatrFVecGVecAndGScalJ: invalid phase/block combination");
+  }
+
+  const auto [first_row, first_scal] = getFIJMinResolution(first_i, first_j, n);
+  const auto [second_row, second_scal]
+      = getFIJMinResolution(second_i, second_j, n);
+  const Eigen::RowVectorXd first = restrict_row(first_row);
+  const Eigen::RowVectorXd second = restrict_row(second_row);
+
+  auto local = [&](int state_axis) {
+    for (int d = 0; d < c; ++d) {
+      if (block.coords[d] == state_axis) {
+        return d;
+      }
+    }
+    throw std::runtime_error("getBlockAMatrFVecGVecAndGScalJ: coordinate is "
+                             "not in this block");
+  };
+
+  const int source = local(first_i);
+  const int first_dest = local(first_j);
+  const int second_dest = local(second_j);
+  a_matr.row(first_dest) += first;
+  b_vec(first_dest) += first_scal(0);
+  a_matr.row(second_dest) += second;
+  b_vec(second_dest) += second_scal(0);
+  a_matr.row(source) -= first + second;
+  b_vec(source) -= first_scal(0) + second_scal(0);
+
+  g_vec = (first + second).transpose();
+  g_scal = first_scal(0) + second_scal(0);
+
+  // assertScalar is the only non-finite guard on this data, and it matters more
+  // now that the representative point is NaN-padded outside the block: a NaN
+  // reaching g_scal would otherwise flow through kappaFixed into every row of
+  // this block and surface as an unrelated HiGHS status much later.
+  hcpwa::util::assertShape(a_matr, c, c);
+  hcpwa::util::assertShape(b_vec, c);
+  hcpwa::util::assertShape(g_vec, c);
+  hcpwa::util::assertScalar(g_scal);
   return std::make_tuple(a_matr, b_vec, g_vec, g_scal);
 }
 
 std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd, Eigen::VectorXd>
-GlobalAffineApproximator::getQQForArea(int j, int phase) const {
-  // Get representative point in Ω(j)
-  Eigen::VectorXd n0 = areaCentroidCoords(j, phase);
+GlobalAffineApproximator::getBlockQQ(int phase, int block_id,
+                                     int j_block) const {
+  // The disturbance box is componentwise -- each component's bounds depend on
+  // its own coordinate only -- so restricting it to a block is exact. The loop
+  // runs over the block's own coordinates rather than all eight, which is what
+  // makes the NaN padding safe.
+  const auto& block = blocks_[phase][block_id];
+  const int c = block.coord_count;
+  const Eigen::VectorXd n0 = blockCentroidCoords(phase, block_id, j_block);
 
-  Eigen::MatrixXd Q_upper_matr = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Eigen::VectorXd q_upper_vec = Eigen::VectorXd::Zero(kSpaceDim);
-  Eigen::MatrixXd Q_lower_matr = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Eigen::VectorXd q_lower_vec = Eigen::VectorXd::Zero(kSpaceDim);
+  Eigen::MatrixXd Q_upper = Eigen::MatrixXd::Zero(c, c);
+  Eigen::VectorXd q_upper = Eigen::VectorXd::Zero(c);
+  Eigen::MatrixXd Q_lower = Eigen::MatrixXd::Zero(c, c);
+  Eigen::VectorXd q_lower = Eigen::VectorXd::Zero(c);
 
   const double N = system_params_.N;
   const double w = system_params_.w;
   const double v = system_params_.v;
   const double F = system_params_.F;
 
-  // Process IN_IDS
-  for (int i : kInIds) {
-    auto ni = n0(i);
-    auto [f_min, f_max] = getFMinMaxForAxis(i);
-    // lower
-    if (f_min < w * (N - ni)) {
-      q_lower_vec(i) = f_min;
-    } else {
-      Q_lower_matr(i, i) = -w;
-      q_lower_vec(i) = w * N;
+  for (int d = 0; d < c; ++d) {
+    const int axis = block.coords[d];
+    const double ni = n0(d);
+    const bool is_in
+        = std::find(kInIds.begin(), kInIds.end(), axis) != kInIds.end();
+    const bool is_out
+        = std::find(kOutIds.begin(), kOutIds.end(), axis) != kOutIds.end();
+    if (is_in == is_out) {
+      throw std::runtime_error(std::format(
+          "getBlockQQ: coordinate {} is {} an inflow and an outflow cell", axis,
+          is_in ? "both" : "neither"));
     }
-    // upper
-    if (f_max < w * (N - ni)) {
-      q_upper_vec(i) = f_max;
+    if (is_in) {
+      auto [f_min, f_max] = getFMinMaxForAxis(axis);
+      if (f_min < w * (N - ni)) {
+        q_lower(d) = f_min;
+      } else {
+        Q_lower(d, d) = -w;
+        q_lower(d) = w * N;
+      }
+      if (f_max < w * (N - ni)) {
+        q_upper(d) = f_max;
+      } else {
+        Q_upper(d, d) = -w;
+        q_upper(d) = w * N;
+      }
     } else {
-      Q_upper_matr(i, i) = -w;
-      q_upper_vec(i) = w * N;
+      if (F < v * ni) {
+        q_lower(d) = -F;
+      } else {
+        Q_lower(d, d) = -v;
+      }
     }
   }
 
-  // Process OUT_IDS
-  for (int i : kOutIds) {
-    auto ni = n0(i);
-    // lower
-    if (F < v * ni) {
-      q_lower_vec(i) = -F;
-    } else {
-      Q_lower_matr(i, i) = -v;
-    }
-  }
-
-  // Q_c = 1/2 * (Q_upper + Q_lower)
-  // Q_r = 1/2 * (Q_upper - Q_lower)
-  Eigen::MatrixXd Q_c = (Q_upper_matr + Q_lower_matr) / 2;
-  Eigen::MatrixXd Q_r = (Q_upper_matr - Q_lower_matr) / 2;
-  Eigen::VectorXd q_c = (q_upper_vec + q_lower_vec) / 2;
-  Eigen::VectorXd q_r = (q_upper_vec - q_lower_vec) / 2;
-
-  return std::make_tuple(Q_c, q_c, Q_r, q_r);
+  return std::make_tuple((Q_upper + Q_lower) / 2.0, (q_upper + q_lower) / 2.0,
+                         (Q_upper - Q_lower) / 2.0, (q_upper - q_lower) / 2.0);
 }
 
-//
-std::tuple<std::vector<Eigen::MatrixXd>,  // A_j_matrs_lst
-           std::vector<Eigen::VectorXd>,  // f_j_vecs_lst
-           std::vector<Eigen::MatrixXd>,  // Q_c_j_matrs_lst
-           std::vector<Eigen::VectorXd>,  // q_c_j_vecs_lst
-           std::vector<Eigen::MatrixXd>,  // Q_r_j_matrs_lst
-           std::vector<Eigen::VectorXd>,  // q_r_j_vecs_lst
-           std::vector<Eigen::VectorXd>,  // g_j_vecs_lst
-           std::vector<double>            // g_j_scals_lst
-           >
-GlobalAffineApproximator::precomputeSystemMatrices(int phase) {
-  auto intersection_points_phase = intersection_points_[phase];
-  int n_areas = intersection_points_phase.size();
-  std::vector<Eigen::MatrixXd> A_j_matrs_lst;
-  std::vector<Eigen::VectorXd> f_j_vecs_lst;
-  std::vector<Eigen::MatrixXd> Q_c_j_matrs_lst;
-  std::vector<Eigen::VectorXd> q_c_j_vecs_lst;
-  std::vector<Eigen::MatrixXd> Q_r_j_matrs_lst;
-  std::vector<Eigen::VectorXd> q_r_j_vecs_lst;
-  std::vector<Eigen::VectorXd> g_j_vecs_lst;
-  std::vector<double> g_j_scals_lst;
-  A_j_matrs_lst.reserve(n_areas);
-  f_j_vecs_lst.reserve(n_areas);
-  Q_c_j_matrs_lst.reserve(n_areas);
-  q_c_j_vecs_lst.reserve(n_areas);
-  Q_r_j_matrs_lst.reserve(n_areas);
-  q_r_j_vecs_lst.reserve(n_areas);
-  g_j_vecs_lst.reserve(n_areas);
-  g_j_scals_lst.reserve(n_areas);
+void GlobalAffineApproximator::precomputeSystemMatrices(int phase) {
+  // About 509 small objects per phase, against 1.36M dense 8x8 blocks before.
+  for (int b = 0; b < kBlockCount; ++b) {
+    auto& block = blocks_[phase][b];
+    block.a_matr.assign(block.num_regions, {});
+    block.f_vec.assign(block.num_regions, {});
+    block.q_c_matr.assign(block.num_regions, {});
+    block.q_c_vec.assign(block.num_regions, {});
+    block.q_r_matr.assign(block.num_regions, {});
+    block.q_r_vec.assign(block.num_regions, {});
+    block.g_vec.assign(block.num_regions, {});
+    block.g_scal.assign(block.num_regions, 0.0);
 
-  for (int j = 0; j < n_areas; ++j) {
-    auto [A_j_matr, f_j_vec, g_j_vec, g_j_scal]
-        = getAMatrFVecGVecAndGScalJ(j, phase);
-    auto [Q_c_j_matr, q_c_j_vec, Q_r_j_matr, q_r_j_vec]
-        = getQQForArea(j, phase);
-    hcpwa::util::assertShape(A_j_matr, kSpaceDim, kSpaceDim);
-    hcpwa::util::assertShape(f_j_vec, kSpaceDim);
-    hcpwa::util::assertShape(g_j_vec, kSpaceDim);
-    hcpwa::util::assertScalar(g_j_scal);
-    A_j_matrs_lst.emplace_back(A_j_matr);
-    f_j_vecs_lst.emplace_back(f_j_vec);
-    Q_c_j_matrs_lst.emplace_back(Q_c_j_matr);
-    q_c_j_vecs_lst.emplace_back(q_c_j_vec);
-    Q_r_j_matrs_lst.emplace_back(Q_r_j_matr);
-    q_r_j_vecs_lst.emplace_back(q_r_j_vec);
-    g_j_vecs_lst.emplace_back(g_j_vec);
-    g_j_scals_lst.emplace_back(g_j_scal);
-  }
-
-  return std::make_tuple(A_j_matrs_lst, f_j_vecs_lst, Q_c_j_matrs_lst,
-                         q_c_j_vecs_lst, Q_r_j_matrs_lst, q_r_j_vecs_lst,
-                         g_j_vecs_lst, g_j_scals_lst);
-}
-
-// ---------- Main builder: builds the (j)-segment feasibility rows only
-// ----------
-//
-// Decision vector is x = [ V ; v ; s ], size = (m) + 1 + (m) = 2m+1.
-//
-// For each vertex n in vertices_j, we add ONE feasibility constraint:
-//
-//    p(n)^T V - 1*v + dt*r(n)^T s <= -kappa(n)
-//
-// Right-hand side is split:
-//   -kappa(n) = -kappa_fix(n) - kappa_t(n)
-// where kappa_t(n) = V_prev^T n + v_prev is applied later via RHS updates.
-//
-void GlobalAffineApproximator::buildLPSegmentForJ(
-    const Eigen::MatrixXd& Aj,   // A^{(j)} (m x m)
-    const Eigen::VectorXd& fj,   // f^{(j)} (m)
-    const Eigen::MatrixXd& Qc,   // Q_c^{(j)} (m x m)
-    const Eigen::VectorXd& qc,   // q_c^{(j)} (m)
-    const Eigen::MatrixXd& Qr,   // Q_r^{(j)} (m x m)
-    const Eigen::VectorXd& qr,   // q_r^{(j)} (m)
-    const Eigen::VectorXd& g_n,  // g_{i,n}^{(j)} (m)
-    double g0,                   // g_{i,0}^{(j)} (scalar)
-    const std::vector<Eigen::VectorXd>&
-        vertices_j,  // vertices of Omega^{(j)}, each (m)
-    double dt,
-    // CSR format vectors for the A (constraint) matrix of the LP
-    std::vector<int>& starts,     // Row start indices (CSR)
-    std::vector<int>& cols,       // Column indices (CSR)
-    std::vector<double>& values,  // Nonzero values (CSR)
-    std::vector<double>&
-        b_fixed,  // fixed RHS part of Ax <= b_fixed + b_time
-    Eigen::VectorXd& obj_p_accum, int& vertex_count) {
-  if (vertices_j.empty()) {
-    throw std::runtime_error("build_lp_segment_for_j: vertices_j is empty.");
-  }
-
-  const int n_vertices = static_cast<int>(vertices_j.size());
-  const int n_cols = kLPCols;  // [V(m), v(1), s(m)]
-
-  // Basic dimension checks (lightweight)
-  if (Aj.rows() != kSpaceDim || Aj.cols() != kSpaceDim) {
-    throw std::runtime_error("Aj has wrong shape.");
-  }
-  if (fj.size() != kSpaceDim) {
-    throw std::runtime_error("fj has wrong size.");
-  }
-  if (Qc.rows() != kSpaceDim || Qc.cols() != kSpaceDim) {
-    throw std::runtime_error("Qc has wrong shape.");
-  }
-  if (qc.size() != kSpaceDim) {
-    throw std::runtime_error("qc has wrong size.");
-  }
-  if (Qr.rows() != kSpaceDim || Qr.cols() != kSpaceDim) {
-    throw std::runtime_error("Qr has wrong shape.");
-  }
-  if (qr.size() != kSpaceDim) {
-    throw std::runtime_error("qr has wrong size.");
-  }
-  if (g_n.size() != kSpaceDim) {
-    throw std::runtime_error("g_n has wrong size.");
-  }
-
-  for (int k = 0; k < n_vertices; ++k) {
-    const Eigen::VectorXd& n = vertices_j[k];
-    if (n.size() != kSpaceDim) {
-      throw std::runtime_error("Vertex has inconsistent dimension.");
+    for (int j = 0; j < block.num_regions; ++j) {
+      auto [a_matr, f_vec, g_vec, g_scal]
+          = getBlockAMatrFVecGVecAndGScalJ(phase, b, j);
+      auto [q_c_matr, q_c_vec, q_r_matr, q_r_vec] = getBlockQQ(phase, b, j);
+      block.a_matr[j] = std::move(a_matr);
+      block.f_vec[j] = std::move(f_vec);
+      block.g_vec[j] = std::move(g_vec);
+      block.g_scal[j] = g_scal;
+      block.q_c_matr[j] = std::move(q_c_matr);
+      block.q_c_vec[j] = std::move(q_c_vec);
+      block.q_r_matr[j] = std::move(q_r_matr);
+      block.q_r_vec[j] = std::move(q_r_vec);
     }
-
-    const Eigen::VectorXd p = hcpwa::util::coeffP(Aj, fj, Qc, qc, n, dt);
-    const Eigen::VectorXd r = hcpwa::util::radiusR(Qr, qr, n);
-    double kappa_fix = hcpwa::util::kappaFixed(g_n, g0, n, dt);
-
-    const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
-    Eigen::RowVectorXd feas_row = Eigen::RowVectorXd::Zero(n_cols);
-    if (is_upper) {
-      feas_row.block(0, 0, 1, kSpaceDim) = p.transpose();
-      feas_row(kSpaceDim) = -1.0;
-      feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
-    } else {
-      feas_row.block(0, 0, 1, kSpaceDim) = -p.transpose();
-      feas_row(kSpaceDim) = 1.0;
-      feas_row.block(0, kSpaceDim + 1, 1, kSpaceDim) = dt * r.transpose();
-    }
-
-    if (std::abs(kappa_fix) > kEps) {
-      b_fixed.push_back(is_upper ? -kappa_fix : kappa_fix);
-    } else {
-      b_fixed.push_back(0);
-    }
-    hcpwa::util::csrAppendRow(starts, cols, values, feas_row, kEps);
-
-    obj_p_accum += p;
-    ++vertex_count;
   }
 }
 
-std::tuple<std::vector<int>, std::vector<int>, std::vector<double>,
-           std::vector<double>, Eigen::RowVectorXd>
+hcpwa::util::global_block_lp::GlobalReducedLp
 GlobalAffineApproximator::prepareLpMatrices(int phase) {
-  // Gather all per-area matrix/vector data for this phase from member
-  // variables
-  const std::vector<Eigen::MatrixXd>& a_j_matrs = this->A_j_matrs_[phase];
-  const std::vector<Eigen::VectorXd>& f_j_vecs = this->f_j_vecs_[phase];
-  const std::vector<Eigen::MatrixXd>& q_c_j_matrs = this->Q_c_j_matrs_[phase];
-  const std::vector<Eigen::VectorXd>& q_c_j_vecs = this->q_c_j_vecs_[phase];
-  const std::vector<Eigen::MatrixXd>& q_r_j_matrs = this->Q_r_j_matrs_[phase];
-  const std::vector<Eigen::VectorXd>& q_r_j_vecs = this->q_r_j_vecs_[phase];
-  const std::vector<Eigen::VectorXd>& g_j_vecs = this->g_j_vecs_[phase];
-  const std::vector<double>& g_j_scals = this->g_j_scals_[phase];
-  const std::vector<Eigen::MatrixXd>& b_j_matrs = this->b_j_matrs_[phase];
-  const std::vector<Eigen::VectorXd>& b_j_vecs = this->b_j_vecs_[phase];
-  const auto& intersection_points_phase = intersection_points_[phase];
-  int n_areas = intersection_points_phase.size();
-  std::vector<int> starts = {0};
-  std::vector<int> col_index;
-  std::vector<double> value;
-  std::vector<double> row_upper;
-  Eigen::VectorXd obj_p_accum = Eigen::VectorXd::Zero(kSpaceDim);
-  int vertex_count = 0;
-  // n_areas = 1000000;
+  // Builds the block-reduced LP. Three independent block row sets plus one
+  // scalar coupling row, in place of one row per element of the Cartesian
+  // product R_A x R_B x R_C.
+  //
+  // The reduction is exact: the feasible sets have identical projections onto
+  // the decision variables (notes/step7_block_reduction.md, Lemmas 3 and 4).
+  // Unlike the barycentric path there is no per-region y to identify, because
+  // the modulus lift s is already a single global vector, so no analogue of
+  // Lemma 5 is needed here.
+  //
+  // Row count on the production geometry: about 3.5e3 + 17, against 1.6e7 for
+  // the truncated product form or roughly 2e8 for the product form built
+  // correctly. The column count is unchanged apart from the three mu columns.
+  namespace gblp = hcpwa::util::global_block_lp;
 
-  for (int j = 0; j < n_areas; ++j) {
-    buildLPSegmentForJ(a_j_matrs[j], f_j_vecs[j], q_c_j_matrs[j], q_c_j_vecs[j],
-                       q_r_j_matrs[j], q_r_j_vecs[j], g_j_vecs[j], g_j_scals[j],
-                       intersection_points_phase[j], t_delta_, starts,
-                       col_index, value, row_upper, obj_p_accum, vertex_count);
-  }
-  // s >= V and s >= -V
-  // [V, v, s], where s \in R^kSpaceDim
-  for (int i = 0; i < kSpaceDim; i++) {
-    Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(kLPCols);
-    row(i) = 1;
-    row(i + kSpaceDim + 1) = -1;
-    hcpwa::util::csrAppendRow(starts, col_index, value, row);
-  }
-  for (int i = 0; i < kSpaceDim; i++) {
-    Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(kLPCols);
-    row(i) = -1;
-    row(i + kSpaceDim + 1) = -1;
-    hcpwa::util::csrAppendRow(starts, col_index, value, row);
-  }
-  for (int i = 0; i < 2 * kSpaceDim; i++) {
-    row_upper.push_back(0);
-  }
-
-  Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(kLPCols);
   const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
-  if (is_upper) {
-    c_vec.head(kSpaceDim) = -obj_p_accum.transpose();
-    c_vec(kSpaceDim) = static_cast<double>(vertex_count);
-  } else {
-    c_vec.head(kSpaceDim) = obj_p_accum.transpose();
-    c_vec(kSpaceDim) = -static_cast<double>(vertex_count);
-  }
-  // TODO(experiment): Temporarily disable s-regularization in the objective
-  // to test whether it is unnecessary.
-  // === s-pinning penalty (Option 1, see plan): pin s_i = |V_i| ===
-  c_vec.segment(kSpaceDim + 1, kSpaceDim)
-      = Eigen::RowVectorXd::Constant(kSpaceDim, kSPinWeight);
-  // ==============================================================
+  const double sigma = is_upper ? 1.0 : -1.0;
 
-  return std::make_tuple(std::move(starts), std::move(col_index),
-                         std::move(value), std::move(row_upper),
-                         std::move(c_vec));
+  std::array<gblp::GlobalBlockInput, kBlockCount> inputs;
+  for (int b = 0; b < kBlockCount; ++b) {
+    const auto& block = blocks_[phase][b];
+    gblp::GlobalBlockInput& input = inputs[b];
+    input.coords = block.coords;
+    input.coord_count = block.coord_count;
+
+    // Normalised weights. Summing over the Cartesian product would weight each
+    // block by the row count of the other two, which is an artefact of how the
+    // sum is taken rather than a design decision, and the product objective was
+    // never computable at this scale anyway. The resulting optimum is not the
+    // one the product objective would give; validity of the bound does not
+    // depend on the objective, only tightness does.
+    input.objective_weight = 1.0;
+
+    std::size_t total_rows = 0;
+    for (const auto& vertices : block.vertices) {
+      total_rows += vertices.size();
+    }
+    input.rows.reserve(total_rows);
+
+    for (int j = 0; j < block.num_regions; ++j) {
+      for (const Eigen::VectorXd& nu : block.vertices[j]) {
+        gblp::GlobalBlockRow row;
+        row.nu = nu;
+        // p, r and kappa restricted to this block. Because A is block diagonal
+        // and Q_c, Q_r are diagonal, these are exactly the block's slice of the
+        // full-dimensional quantities: no approximation.
+        row.p = hcpwa::util::coeffP(block.a_matr[j], block.f_vec[j],
+                                    block.q_c_matr[j], block.q_c_vec[j], nu,
+                                    t_delta_);
+        row.r = hcpwa::util::radiusR(block.q_r_matr[j], block.q_r_vec[j], nu);
+        row.kappa = hcpwa::util::kappaFixed(block.g_vec[j], block.g_scal[j], nu,
+                                            t_delta_);
+        input.rows.push_back(std::move(row));
+      }
+    }
+  }
+
+  gblp::GlobalReducedLpOptions options;
+  options.dt = t_delta_;
+  options.sigma = sigma;
+  options.s_pin_weight = kSPinWeight;
+  options.coefficient_eps = kEps;
+
+  gblp::GlobalReducedLp lp = assembleGlobalReducedLp(inputs, options);
+
+  logger_->info(
+      "prepareLpMatrices: phase={}, cols={}, block regions={}/{}/{}, block "
+      "rows={}/{}/{}, rows={}, nnz={}",
+      phase, lp.num_cols, blocks_[phase][0].num_regions,
+      blocks_[phase][1].num_regions, blocks_[phase][2].num_regions,
+      lp.num_block_rows[0], lp.num_block_rows[1], lp.num_block_rows[2],
+      lp.row_upper.size(), lp.values.size());
+
+  return lp;
+}
+
+void GlobalAffineApproximator::validateStepResiduals(
+    int phase, const std::vector<double>& v_prev,
+    const std::vector<double>& v_cur) const {
+  // Checks the ORIGINAL condition on the original index set:
+  //   sigma * F(a,b,c) <= 0  for (a,b,c) in R_A x R_B x R_C,
+  // with F additively separable across the three blocks. The reduced rows are
+  // what the LP already enforced; the triples are what the bound property is
+  // actually about, and evaluating one costs three lookups and two additions.
+  //
+  // Under the old truncation only 12 of an area's 108-192 vertices were
+  // constrained, so almost any sampled triple would show sigma*F > 0. That is
+  // exactly what this is here to catch.
+  namespace gblp = hcpwa::util::global_block_lp;
+  if (v_prev.size() != kVDeltaDim || v_cur.size() != kVDeltaDim) {
+    throw std::invalid_argument("validateStepResiduals: bad value size");
+  }
+  const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
+  const double sigma = is_upper ? 1.0 : -1.0;
+
+  // Per block, the residual contribution of each of its rows. The constant
+  // terms (v of the current step, and the previous step's constant) belong to
+  // exactly one block, matching the row assembly.
+  std::array<std::vector<double>, kBlockCount> contributions;
+  for (int b = 0; b < kBlockCount; ++b) {
+    const auto& block = blocks_[phase][b];
+    const bool carries_const = (b == gblp::kVCarryingBlock);
+    for (int j = 0; j < block.num_regions; ++j) {
+      for (const Eigen::VectorXd& nu : block.vertices[j]) {
+        const Eigen::VectorXd p
+            = hcpwa::util::coeffP(block.a_matr[j], block.f_vec[j],
+                                  block.q_c_matr[j], block.q_c_vec[j], nu,
+                                  t_delta_);
+        const Eigen::VectorXd r
+            = hcpwa::util::radiusR(block.q_r_matr[j], block.q_r_vec[j], nu);
+        const double kappa = hcpwa::util::kappaFixed(
+            block.g_vec[j], block.g_scal[j], nu, t_delta_);
+
+        // The row is
+        //   sigma * (p^T V - v) + dt * r^T s + sigma * (kappa + b_upd) <= 0
+        // with s = |V| at the optimum and b_upd = V_prev^T n + v_prev. Every
+        // term carries sigma except the r term, whose sign is the same for both
+        // bound directions.
+        double value = sigma * kappa;
+        for (int d = 0; d < block.coord_count; ++d) {
+          const int axis = block.coords[d];
+          value += sigma * p(d) * v_cur[axis];
+          value += t_delta_ * r(d) * std::abs(v_cur[axis]);
+          value += sigma * v_prev[axis] * nu(d);
+        }
+        if (carries_const) {
+          value += -sigma * v_cur[kSpaceDim] + sigma * v_prev[kSpaceDim];
+        }
+        contributions[b].push_back(value);
+      }
+    }
+    if (contributions[b].empty()) {
+      throw std::runtime_error("validateStepResiduals: block has no rows");
+    }
+  }
+
+  // EXACT, not sampled. The residual is additively separable across the three
+  // blocks, so max over all R_A*R_B*R_C triples is the sum of the three
+  // per-block maxima -- O(R_A+R_B+R_C) instead of a sample of ~2e8, and it
+  // cannot miss a violation confined to one block row. contributions[] already
+  // carry sigma, so maximising them directly is correct for both directions.
+  const std::size_t total
+      = contributions[0].size() * contributions[1].size()
+        * contributions[2].size();
+  double worst = 0.0;
+  std::array<std::size_t, kBlockCount> worst_ids{};
+  for (int b = 0; b < kBlockCount; ++b) {
+    double best = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < contributions[b].size(); ++i) {
+      if (contributions[b][i] > best) {
+        best = contributions[b][i];
+        worst_ids[b] = i;
+      }
+    }
+    worst += best;
+  }
+
+  if (worst > kResidualValidationTol) {
+    throw std::runtime_error(std::format(
+        "validateStepResiduals: phase {} is not a bound. worst residual = {}, "
+        "witness triple (block rows {}, {}, {}) out of {} triples checked "
+        "exhaustively.",
+        phase, worst, worst_ids[0], worst_ids[1], worst_ids[2], total));
+  }
+  logger_->info(
+      "validateStepResiduals: phase={}, {} triples covered exhaustively, "
+      "worst={}",
+      phase, total, worst);
 }
 
 double GlobalAffineApproximator::getBorderFuncValuesAtN(
@@ -965,9 +1044,18 @@ std::vector<double> GlobalAffineApproximator::getBorderConditions(
 
 std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
 GlobalAffineApproximator::initializeHighs(int phase) {
-  auto [starts, col_index, value, row_upper, c_vec] = prepareLpMatrices(phase);
-  const int m = row_upper.size();
-  const int n = c_vec.size();
+  // Reads the per-phase assembly prepared by precomputeMatrices(). It must NOT
+  // assemble here: run() builds the solvers from a thread pool, so assigning
+  // reduced_lps_[phase] from several threads would race, and each thread holds
+  // a reference into that object while handing its buffers to HiGHS.
+  const hcpwa::util::global_block_lp::GlobalReducedLp& lp = reduced_lps_[phase];
+  if (lp.row_upper.empty()) {
+    throw std::runtime_error(
+        "initializeHighs: LP not assembled. Call precomputeMatrices() first.");
+  }
+  std::vector<double> row_upper = lp.row_upper;
+  const int m = static_cast<int>(row_upper.size());
+  const int n = lp.num_cols;
 
   std::unique_ptr<Highs> highs = std::make_unique<Highs>();
 
@@ -991,16 +1079,16 @@ GlobalAffineApproximator::initializeHighs(int phase) {
   // L1-residual inner LP objective is minimized.
   highs->changeObjectiveSense(ObjSense::kMinimize);
 
-  const double inf = highs->getInfinity();
-  std::vector<double> col_lower(n, -inf);
-  std::vector<double> col_upper(n, inf);
-  std::vector<double> row_lower(m, -inf);
+  std::vector<double> col_lower = lp.col_lower;
+  std::vector<double> col_upper = lp.col_upper;
+  std::vector<double> row_lower = lp.row_lower;
 
   // Add all columns at once, with no matrix coefficients yet (we'll add rows
   // next). Signature: addCols(num_new_col, cost, lower, upper, num_nz, start,
   // index, value)
   HighsStatus st
-      = highs->addCols(n, c_vec.data(), col_lower.data(), col_upper.data(),
+      = highs->addCols(n, lp.objective.data(), col_lower.data(),
+                       col_upper.data(),
                        /*num_nz=*/0,
                        /*start=*/nullptr,
                        /*index=*/nullptr,
@@ -1012,17 +1100,18 @@ GlobalAffineApproximator::initializeHighs(int phase) {
   // ---- Add rows with their coefficients ----
   // Signature: addRows(num_new_row, lower, upper, num_nz, start, index,
   // value)
-  st = highs->addRows(m, row_lower.data(), row_upper.data(), value.size(),
-                      starts.data(), col_index.data(), value.data());
+  st = highs->addRows(m, row_lower.data(), row_upper.data(), lp.values.size(),
+                      lp.starts.data(), lp.cols.data(), lp.values.data());
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("InitializeHighs: highs.addRows failed.");
   }
 
-  // Warm-start the main LP with x0 = ones.
-  // Layout: [V(kSpaceDim), v, s(kSpaceDim)].
+  // Warm-start at the origin. Layout is now [V(8), v, s(8), mu(3)], and the
+  // coupling row is sum_b mu_b <= 0, so the old all-ones start would hand the
+  // solver a point that violates a constraint of the model by 3.
   HighsSolution initial_solution;
   initial_solution.value_valid = true;
-  initial_solution.col_value.assign(n, 1.0);
+  initial_solution.col_value.assign(n, 0.0);
   st = highs->setSolution(initial_solution);
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("InitializeHighs: highs.setSolution failed.");
@@ -1035,41 +1124,34 @@ GlobalAffineApproximator::initializeHighs(int phase) {
 
 void GlobalAffineApproximator::updateHighsRhsUpperBounds(
     int phase, int solver_index, const std::vector<double>& v_prev_vec) {
+  // Only the residual row right-hand sides depend on the previous step's value
+  // function; the s rows, the coupling row and the column bounds are static.
+  //
+  // b_upd is that value function evaluated at a vertex, V_prev^T n + v_prev. It
+  // splits the same way the rows do: the linear part restricted to the block,
+  // and the constant only on the block that carries v. Cost drops from O(R) to
+  // O(R_A + R_B + R_C).
   if (v_prev_vec.size() != kVDeltaDim) {
     throw std::invalid_argument("v_prev_vec size must be "
                                 + std::to_string(kVDeltaDim));
   }
   const auto& row_lower = row_lowers_[solver_index];
-  const auto& row_upper = row_uppers_[solver_index];
   auto& highs_solver = highs_solvers_[solver_index];
-  std::vector<double> new_row_upper(row_lower.size());
-  const auto& intersection_points_phase = intersection_points_[phase];
-  std::vector<int> row_ids(row_upper.size());
-  std::iota(row_ids.begin(), row_ids.end(), 0);
 
-  const bool is_upper = (approximation_mode_ == ApproximationMode::Upper);
-  int j = 0;
-  for (auto& area : intersection_points_phase) {
-    for (auto& vertex : area) {
-      double b_upd = 0.0;
-      for (int i = 0; i < kSpaceDim; ++i) {
-        b_upd += v_prev_vec[i] * vertex(i);
-      }
-      b_upd += v_prev_vec[kSpaceDim];
-      if (is_upper) {
-        new_row_upper[j] = row_upper[j] - b_upd;
-      } else {
-        new_row_upper[j] = row_upper[j] + b_upd;
-      }
-      if (std::abs(new_row_upper[j]) <= kEps) {
-        new_row_upper[j] = 0.0;
-      }
-      j++;
+  std::vector<double> new_row_upper
+      = hcpwa::util::global_block_lp::globalReducedLpRowUpper(
+          reduced_lps_[phase], v_prev_vec);
+  for (double& upper : new_row_upper) {
+    if (std::abs(upper) <= kEps) {
+      upper = 0.0;
     }
   }
 
+  std::vector<int> row_ids(new_row_upper.size());
+  std::iota(row_ids.begin(), row_ids.end(), 0);
   auto st = highs_solver->changeRowsBounds(
-      row_upper.size(), row_ids.data(), row_lower.data(), new_row_upper.data());
+      static_cast<int>(row_ids.size()), row_ids.data(), row_lower.data(),
+      new_row_upper.data());
   if (st != HighsStatus::kOk) {
     throw std::runtime_error(
         "updateHighsRhsUpperBounds: highs.changeRowsUpperBounds failed.");
@@ -1113,31 +1195,33 @@ std::vector<double> GlobalAffineApproximator::solveLp(int solver_index) {
 
 void GlobalAffineApproximator::precomputeMatrices() {
   logger_->info("Starting precomputeMatrices");
-  if (intersection_points_.empty()) {
-    throw std::runtime_error(
-        "precomputeMatrices: intersection points not computed. Call "
-        "getIntersectionPoints() before precomputeMatrices().");
-  }
-  if (!b_j_matrs_.empty() || !b_j_vecs_.empty() || !g_j_vecs_.empty()
-      || !g_j_scals_.empty()) {
-    throw std::runtime_error(
-        "precomputeMatrices: b_j_matrs, b_j_vecs, g_j_vecs, or g_j_scals "
-        "are "
-        "not empty.");
+  for (int phase = 0; phase < 2; ++phase) {
+    if (blocks_[phase][0].num_regions == 0) {
+      throw std::runtime_error(
+          "precomputeMatrices: geometry not computed. Call "
+          "getIntersectionPoints() before precomputeMatrices().");
+    }
   }
 
   for (int phase = 0; phase < kPhases; ++phase) {
-    auto [A_j_matrs_lst, f_j_vecs_lst, Q_c_j_matrs_lst, q_c_j_vecs_lst,
-          Q_r_j_matrs_lst, q_r_j_vecs_lst, g_j_vecs_lst, g_j_scals_lst]
-        = precomputeSystemMatrices(phase);
-    this->A_j_matrs_.push_back(std::move(A_j_matrs_lst));
-    this->f_j_vecs_.push_back(std::move(f_j_vecs_lst));
-    this->Q_c_j_matrs_.push_back(std::move(Q_c_j_matrs_lst));
-    this->q_c_j_vecs_.push_back(std::move(q_c_j_vecs_lst));
-    this->Q_r_j_matrs_.push_back(std::move(Q_r_j_matrs_lst));
-    this->q_r_j_vecs_.push_back(std::move(q_r_j_vecs_lst));
-    this->g_j_vecs_.push_back(std::move(g_j_vecs_lst));
-    this->g_j_scals_.push_back(std::move(g_j_scals_lst));
+    precomputeSystemMatrices(phase);
+    std::size_t block_regions = 0;
+    std::size_t block_rows = 0;
+    for (int b = 0; b < kBlockCount; ++b) {
+      block_regions += blocks_[phase][b].num_regions;
+      for (const auto& vertices : blocks_[phase][b].vertices) {
+        block_rows += vertices.size();
+      }
+    }
+    logger_->info(
+        "precomputeMatrices: phase={}, block regions={}, block rows={}, "
+        "implied full areas={}",
+        phase, block_regions, block_rows, num_regions_[phase]);
+
+    // Assemble once per phase, here, while still single-threaded. The
+    // constraint matrix is fixed for the whole backward march, so every solver
+    // instance of this phase shares this one assembly.
+    reduced_lps_[phase] = prepareLpMatrices(phase);
   }
   logger_->info("Finished precomputeMatrices");
 }
@@ -1165,13 +1249,11 @@ void GlobalAffineApproximator::run(const std::string& output_folder_path,
   logger_->info("Start initializing Highs solvers");
   highs_solvers_.clear();
   row_lowers_.clear();
-  row_uppers_.clear();
   solver_mutexes_.clear();
   const int solvers_per_phase = n_threads / 2;
   const int total_solvers = kPhases * solvers_per_phase;
   highs_solvers_.resize(total_solvers);
   row_lowers_.resize(total_solvers);
-  row_uppers_.resize(total_solvers);
   solver_mutexes_.reserve(n_threads);
   for (int i = 0; i < n_threads; ++i) {
     solver_mutexes_.push_back(std::make_unique<std::mutex>());
@@ -1187,8 +1269,7 @@ void GlobalAffineApproximator::run(const std::string& output_folder_path,
             auto [highs_solver, row_lower, row_upper] = initializeHighs(phase);
             highs_solvers_[solver_index] = std::move(highs_solver);
             row_lowers_[solver_index] = std::move(row_lower);
-            row_uppers_[solver_index] = std::move(row_upper);
-          }));
+                }));
     }
   }
   for (auto& f : init_futures) {
@@ -1277,6 +1358,11 @@ void GlobalAffineApproximator::run(const std::string& output_folder_path,
             } else {
               updateHighsRhsUpperBounds(phase, solver_index, v_prev);
               v_next = solveLp(solver_index);
+              if (validate_) {
+                // Checks that the solved step really is a bound, on the
+                // original product row set rather than the reduced rows.
+                validateStepResiduals(phase, v_prev, v_next);
+              }
             }
 
             if (v_next.size() != kVDeltaDim) {

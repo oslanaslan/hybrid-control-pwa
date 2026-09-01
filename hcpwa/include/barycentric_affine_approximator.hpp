@@ -150,6 +150,14 @@ class BarycentricAffineApproximator {
   SparseVec buildPhiRow(int phase, int region, const Eigen::VectorXd& point,
                         double tolerance = kEps) const;
 
+  // buildPhiRow for one coordinate block. point carries only that block's own
+  // coordinates, in the block's order, and the columns produced are still the
+  // global x columns -- the supports of the three blocks are disjoint, so the
+  // three block rows add up to the full phi row of the product region.
+  SparseVec buildPhiRowBlock(int phase, int block, int block_region,
+                             const Eigen::VectorXd& point,
+                             double tolerance = kEps) const;
+
   std::vector<int> locateRegions(int phase, const Eigen::VectorXd& point,
                                  double tolerance = kEps) const;
 

@@ -3,7 +3,10 @@
 
 #include <Eigen/Core>
 #include <algo.hpp>
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -74,12 +77,44 @@ struct ProjectionLayer {
   std::vector<TriangleBasis> bases;
 };
 
+// The coordinate blocks of a phase, mirrored from hcpwa::BlockRegions.
+constexpr int kBlockCount = hcpwa::kBlockCount;
+constexpr int kMaxBlockCoords = hcpwa::kMaxBlockCoords;
+constexpr int kMaxBlockLayers = hcpwa::kMaxBlockLayers;
+
+// One coordinate block of one phase. The 8D region is the direct product of the
+// three blocks, and every projection plane lies entirely inside one of them, so
+// each block carries a self-contained slice of the geometry.
+struct BlockGeometry {
+  // Global state coordinates of this block, ascending.
+  std::array<int, kMaxBlockCoords> coords{};
+  int coord_count = 0;
+  // Which of the five projection layers belong to this block.
+  std::array<int, kMaxBlockLayers> layer_ids{};
+  int layer_count = 0;
+  // Where each layer's two axes sit inside coords. Two of the six entries are
+  // non-adjacent -- phase 0 layer 3 is (0,2) and phase 1 layer 2 is (0,2) --
+  // which is why this is derived by search rather than written down.
+  std::array<std::array<int, 2>, kMaxBlockLayers> local_axis{};
+
+  // Per block-region, one triangle id per layer of this block.
+  std::vector<std::array<int, kMaxBlockLayers>> triangle_ids;
+  // Per block-region, every vertex, in this block's own coordinate order.
+  std::vector<std::vector<Eigen::VectorXd>> vertices;
+  // Per block-region, the bounding box of those vertices.
+  std::vector<Eigen::VectorXd> aabb_lower;
+  std::vector<Eigen::VectorXd> aabb_upper;
+
+  int numRegions() const { return static_cast<int>(vertices.size()); }
+};
+
 // Geometry for one phase. A full 8D region stores both its vertices and the
 // five triangle ids used to select the local barycentric charts.
 struct PhaseGeometry {
   std::array<ProjectionLayer, kSubsystemCount> layers;
   std::vector<std::vector<Eigen::VectorXd>> region_vertices;
   std::vector<std::array<int, kSubsystemCount>> region_triangle_ids;
+  std::array<BlockGeometry, kBlockCount> blocks;
 };
 
 // The two axes each projection plane is built on, zero-based.
@@ -102,6 +137,59 @@ inline std::array<std::array<int, 2>, kSubsystemCount> projectionAxesForPhase(
   throw std::invalid_argument("projectionAxesForPhase: invalid phase");
 }
 
+// Recovers the coordinate blocks of a phase from projectionAxesForPhase alone:
+// two state coordinates belong to the same block exactly when a chain of
+// projection planes links them, so the blocks are the connected components of
+// the plane incidence graph. Kept next to the axis table because it is the
+// definition the geometry code has to agree with, and the assertions in the
+// approximator compare the two.
+//
+// Components come out ordered by their smallest coordinate, which is not the
+// order the geometry code emits blocks in (phase 1 emits {0,4,6}, {3,5,7},
+// {1,2}). Compare the two as unordered collections.
+inline std::array<std::vector<int>, kBlockCount> coordinateBlocksForPhase(
+    int phase) {
+  const auto axes = projectionAxesForPhase(phase);
+  std::array<int, kSpaceDim> parent{};
+  for (int i = 0; i < kSpaceDim; ++i) {
+    parent[static_cast<std::size_t>(i)] = i;
+  }
+  const std::function<int(int)> find = [&parent](int i) {
+    while (parent[static_cast<std::size_t>(i)] != i) {
+      i = parent[static_cast<std::size_t>(i)];
+    }
+    return i;
+  };
+  for (const auto& pair : axes) {
+    const int ra = find(pair[0]);
+    const int rb = find(pair[1]);
+    if (ra != rb) {
+      parent[static_cast<std::size_t>(ra)] = rb;
+    }
+  }
+
+  std::vector<int> roots;
+  std::array<std::vector<int>, kBlockCount> blocks;
+  for (int i = 0; i < kSpaceDim; ++i) {
+    const int root = find(i);
+    auto it = std::find(roots.begin(), roots.end(), root);
+    if (it == roots.end()) {
+      if (static_cast<int>(roots.size()) == kBlockCount) {
+        throw std::runtime_error(
+            "coordinateBlocksForPhase: more components than blocks");
+      }
+      roots.push_back(root);
+      it = roots.end() - 1;
+    }
+    blocks[static_cast<std::size_t>(it - roots.begin())].push_back(i);
+  }
+  if (static_cast<int>(roots.size()) != kBlockCount) {
+    throw std::runtime_error(
+        "coordinateBlocksForPhase: fewer components than blocks");
+  }
+  return blocks;
+}
+
 // Layout of the LP variable vector:
 //   Y = [x; y_0; y_1; ...; y_{M-1}],
 // where x contains all unique 2D barycentric vertex values and y_j is the
@@ -116,6 +204,37 @@ struct BarycentricVarLayout {
   int idxX(int subsystem, int vertex_id) const;
   int idxY(int region, int dim) const;
 };
+
+// The value selector phi_{j,nu}: V(nu) = phi^T x. Free functions rather than
+// members so that the block path and the product path can be compared on a
+// hand-built PhaseGeometry, without running the arrangement.
+//
+// Both write global x columns. The block form reads only its own block's
+// coordinates, in the block's order, and projects through local_axis; because
+// the three blocks own disjoint sets of planes, summing the three block rows
+// reproduces the product row exactly.
+SparseVec buildPhiRow(const PhaseGeometry& geometry,
+                      const BarycentricVarLayout& layout, int region,
+                      const Eigen::VectorXd& point, double tolerance = kEps);
+
+SparseVec buildPhiRowBlock(const PhaseGeometry& geometry,
+                           const BarycentricVarLayout& layout, int block,
+                           int block_region, const Eigen::VectorXd& point,
+                           double tolerance = kEps);
+
+// Converts the geometry layer's block factorisation into the form the LP uses,
+// deriving local_axis and checking every structural invariant on the way:
+// the blocks partition the eight coordinates and the five planes, and they are
+// the connected components of the plane incidence graph.
+std::array<BlockGeometry, kBlockCount> blockGeometryFromRegions(
+    int phase, const std::array<hcpwa::BlockRegions, kBlockCount>& src);
+
+// Where each of a block's planes puts its two axes inside the block's
+// coordinate list. Throws if a plane straddles two blocks, which is the
+// property the whole reduction rests on.
+std::array<std::array<int, 2>, kMaxBlockLayers> localAxesForBlock(
+    int phase, const std::array<int, kMaxBlockCoords>& coords, int coord_count,
+    const std::array<int, kMaxBlockLayers>& layer_ids, int layer_count);
 
 }  // namespace barycentric_affine_approximator
 

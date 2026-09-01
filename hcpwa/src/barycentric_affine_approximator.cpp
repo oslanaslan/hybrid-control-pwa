@@ -447,6 +447,8 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
       = convert_regions(areas_vertices.intersection_points_phase0);
   phase_geometries_[0].region_triangle_ids
       = convert_region_indices(areas_vertices.intersection_prism_indices_phase0);
+  phase_geometries_[0].blocks
+      = blockGeometryFromRegions(0, areas_vertices.blocks_phase0);
 
   // Phase 1 must use the same order as intersection_prism_indices_phase1:
   // [51, 57, 84, 86, 23].
@@ -465,6 +467,8 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
       = convert_regions(areas_vertices.intersection_points_phase1);
   phase_geometries_[1].region_triangle_ids
       = convert_region_indices(areas_vertices.intersection_prism_indices_phase1);
+  phase_geometries_[1].blocks
+      = blockGeometryFromRegions(1, areas_vertices.blocks_phase1);
 
   for (int phase = 0; phase < kPhases; ++phase) {
     const auto& geometry = phase_geometries_[phase];
@@ -599,52 +603,19 @@ SparseVec BarycentricAffineApproximator::buildPhiRow(
   if (phase < 0 || phase >= kPhases) {
     throw std::invalid_argument("buildPhiRow: invalid phase");
   }
-  if (point.size() != kSpaceDim) {
-    throw std::invalid_argument("buildPhiRow: point must be 8-dimensional");
-  }
-  const auto& geometry = phase_geometries_[phase];
-  const auto& layout = layouts_[phase];
-  if (region < 0
-      || region >= static_cast<int>(geometry.region_triangle_ids.size())) {
-    throw std::invalid_argument("buildPhiRow: invalid region id");
-  }
+  return barycentric_affine_approximator::buildPhiRow(
+      phase_geometries_[phase], layouts_[phase], region, point, tolerance);
+}
 
-  SparseVec phi;
-  const auto& triangle_ids = geometry.region_triangle_ids[region];
-  for (int s = 0; s < kSubsystemCount; ++s) {
-    const int triangle_id = triangle_ids[s];
-    const auto& layer = geometry.layers[s];
-    if (triangle_id < 0
-        || triangle_id >= static_cast<int>(layer.bases.size())) {
-      throw std::runtime_error("buildPhiRow: triangle id out of range");
-    }
-
-    const auto& basis = layer.bases[triangle_id];
-    Eigen::Vector2d projected;
-    projected(0) = point(layer.axes[0]);
-    projected(1) = point(layer.axes[1]);
-    Eigen::Vector3d alpha = basis.H * projected + basis.h;
-
-    // A value row is only meaningful in the selected local simplex. The
-    // tolerance allows points on shared triangle/area boundaries, but rejects
-    // genuine tuple-order mistakes that would project outside the simplex.
-    if (std::abs(alpha.sum() - 1.0) > tolerance) {
-      throw std::runtime_error("buildPhiRow: barycentric alpha sum is not one");
-    }
-    for (int local_vertex = 0; local_vertex < 3; ++local_vertex) {
-      if (alpha(local_vertex) < -tolerance
-          || alpha(local_vertex) > 1.0 + tolerance) {
-        throw std::runtime_error(
-            "buildPhiRow: point is outside selected simplex");
-      }
-      const int x_col = layout.idxX(s, basis.vertex_ids[local_vertex]);
-      // Preserve near-boundary barycentric coordinates. SparseVec::add defaults
-      // to kEps (1e-5), which is larger than the geometry tolerance and can
-      // remove enough mass for the five-layer phi row to stop summing to five.
-      phi.add(x_col, alpha(local_vertex), kGeomEps);
-    }
+SparseVec BarycentricAffineApproximator::buildPhiRowBlock(
+    int phase, int block, int block_region, const Eigen::VectorXd& point,
+    double tolerance) const {
+  if (phase < 0 || phase >= kPhases) {
+    throw std::invalid_argument("buildPhiRowBlock: invalid phase");
   }
-  return phi;
+  return barycentric_affine_approximator::buildPhiRowBlock(
+      phase_geometries_[phase], layouts_[phase], block, block_region, point,
+      tolerance);
 }
 
 std::vector<int> BarycentricAffineApproximator::locateRegions(

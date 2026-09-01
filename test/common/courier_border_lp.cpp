@@ -113,7 +113,10 @@ Fixture makeFixture() {
   const hcpwa::PhaseIntersectionResult inter = hcpwa::compute_intersection_points(
       prisms(ax0[0]), prisms(ax0[1]), prisms(ax0[2]), prisms(ax0[3]),
       prisms(ax0[4]), prisms(ax1[0]), prisms(ax1[1]), prisms(ax1[2]),
-      prisms(ax1[3]), prisms(ax1[4]), tris, tris, kN, /*verbose=*/false);
+      prisms(ax1[3]), prisms(ax1[4]), tris, tris, kN, /*verbose=*/false,
+      // The solver works block by block, but these tests spot-check its answer
+      // at 8D region vertices, so the fixture still materialises the product.
+      {/*build_8d_vertices=*/true});
 
   Fixture f;
   for (int phase = 0; phase < kPhases; ++phase) {

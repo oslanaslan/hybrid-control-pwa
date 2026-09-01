@@ -112,6 +112,10 @@ struct BlockGeometry {
 // five triangle ids used to select the local barycentric charts.
 struct PhaseGeometry {
   std::array<ProjectionLayer, kSubsystemCount> layers;
+  // The 8D product of the block cells. Empty in production: the LP and the
+  // border solver are both assembled block by block, and materialising the
+  // product costs prod_b |V_b| vertices per region. Tests that compare the two
+  // paths ask the geometry layer for it explicitly.
   std::vector<std::vector<Eigen::VectorXd>> region_vertices;
   std::vector<std::array<int, kSubsystemCount>> region_triangle_ids;
   std::array<BlockGeometry, kBlockCount> blocks;

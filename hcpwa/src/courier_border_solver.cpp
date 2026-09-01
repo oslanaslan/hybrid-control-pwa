@@ -3,6 +3,7 @@
 #include <Highs.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <format>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -26,14 +28,37 @@ namespace {
 constexpr double kHighsSolutionTol = 1e-6;
 constexpr double kHighsSmallMatrixValue = 1e-9;
 
-// Multipliers must satisfy the stationarity identities exactly up to rounding;
-// this is a correctness gate, not a convergence knob.
-constexpr double kDualIdentityTol = 1e-7;
+// Multipliers must satisfy the stationarity identities up to rounding; this is
+// a correctness gate, not a convergence knob.
+//
+// Like certificate_tol, it has to sit above the solver's own tolerance -- each
+// multiplier is only dual feasible to kHighsSolutionTol, and the identities sum
+// tens of them, so a duplicate of that tolerance would reject perfectly good
+// duals. It stays a gate all the same: the failures it exists to catch, a
+// flipped row sign or an axis assigned to the wrong block, are off by O(1) and
+// O(n_max), not by 1e-5.
+constexpr double kDualIdentityTol = 1e-4;
 
-void applyHighsOptions(Highs& highs, bool verbose, bool presolve) {
+// Row bounds this close to zero are snapped to zero. They arise as
+// sigma * V_b(nu; z) or sigma * T(g) that happen to land on zero; leaving a
+// 2e-14 bound in a matrix whose other entries are of order 1e2 makes HiGHS warn
+// about excessively small row bounds and can push the simplex into numerical
+// trouble on a problem this badly scaled.
+constexpr double kBoundSnapEps = 1e-12;
+
+double snapBound(double value) {
+  return std::abs(value) <= kBoundSnapEps ? 0.0 : value;
+}
+
+// simplex_strategy 2 is the parallel dual simplex. It is right for the master,
+// which has hundreds of rows, and wrong for the 19-column subproblem, where the
+// concurrency is pure overhead and where it was observed to give up with
+// "Increasing Markowitz threshold" and no model status at all.
+void applyHighsOptions(Highs& highs, bool verbose, bool presolve,
+                       int simplex_strategy = 2) {
   highs.setOptionValue("solver", "simplex");
   highs.setOptionValue("presolve", presolve ? "on" : "off");
-  highs.setOptionValue("simplex_strategy", 2);
+  highs.setOptionValue("simplex_strategy", simplex_strategy);
   highs.setOptionValue("kkt_tolerance", kHighsSolutionTol);
   highs.setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
   highs.setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
@@ -43,6 +68,56 @@ void applyHighsOptions(Highs& highs, bool verbose, bool presolve) {
   highs.setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
   highs.setOptionValue("log_to_console", verbose);
   highs.changeObjectiveSense(ObjSense::kMinimize);
+}
+
+// Builds a model into `highs` and solves it, walking a ladder of simplex
+// settings until one reaches an optimum.
+//
+// Both LPs here are badly scaled: they mix structural +-1 with state
+// coordinates up to n_max and with barycentric weights that sit a hair above
+// zero. The parallel dual simplex does give up on some of them, reporting
+// "Increasing Markowitz threshold" and no model status at all, and it is pure
+// overhead on the 19-column subproblem anyway. presolve stays off on the first
+// two rungs: on the subproblem it removes any question about postsolve dual
+// recovery, which the Benders cut depends on.
+struct SimplexAttempt {
+  bool presolve;
+  int strategy;
+};
+
+bool solveWithFallback(Highs& highs, std::span<const SimplexAttempt> ladder,
+                       bool verbose, int num_cols, const double* cost,
+                       const double* col_lower, const double* col_upper,
+                       int num_rows, const double* row_lower,
+                       const double* row_upper, int num_nz, const int* starts,
+                       const int* index, const double* value,
+                       HighsStatus* last_status) {
+  for (const SimplexAttempt& attempt : ladder) {
+    highs.clear();
+    applyHighsOptions(highs, verbose, attempt.presolve, attempt.strategy);
+    // Loading the model is structural: no simplex setting fixes a rejected
+    // matrix, so it throws rather than moving to the next rung.
+    if (highs.addCols(num_cols, cost, col_lower, col_upper, 0, nullptr, nullptr,
+                      nullptr)
+        != HighsStatus::kOk) {
+      throw std::runtime_error(std::format(
+          "CourierBorderSolver: addCols rejected {} columns", num_cols));
+    }
+    if (num_rows > 0
+        && highs.addRows(num_rows, row_lower, row_upper, num_nz, starts, index,
+                         value)
+               != HighsStatus::kOk) {
+      throw std::runtime_error(std::format(
+          "CourierBorderSolver: addRows rejected {} rows with {} nonzeros over "
+          "{} columns", num_rows, num_nz, num_cols));
+    }
+    *last_status = highs.run();
+    if (*last_status == HighsStatus::kOk
+        && highs.getModelStatus() == HighsModelStatus::kOptimal) {
+      return true;
+    }
+  }
+  return false;
 }
 
 using detail::Point2;
@@ -306,10 +381,51 @@ constexpr int kSubCols = kSubZetaCol + 1 + kBlockCount;
 
 int subTCol(int block) { return kSubZetaCol + 1 + block; }
 
+// Appends one matrix entry, dropping magnitudes HiGHS would drop anyway.
+//
+// Every coefficient this guards is a geometric coordinate -- a state coordinate
+// of a region vertex, or a coordinate of a clipped source vertex -- whose true
+// value is zero wherever the cell touches the boundary of the box; the 1e-13
+// that arrives instead is arrangement rounding. Doing the snap here rather than
+// leaving it to HiGHS keeps addRows at kOk, so a warning from it stays a real
+// signal instead of routine noise. Structural +-1 coefficients never go through
+// this path.
+void pushEntry(std::vector<int>& index, std::vector<double>& value, int column,
+               double entry) {
+  if (std::abs(entry) <= kHighsSmallMatrixValue) {
+    return;
+  }
+  index.push_back(column);
+  value.push_back(entry);
+}
+
+// A courier that certified some region, kept as a screen for the others.
+//
+// For a fixed (c, d) the phase-I objective of any region is
+//   max(0, sum_b t_b(c) - sum_s d_s(c)),
+//   t_b(c) = max over that block cell's vertices of sigma V_b(nu; z) - L_b(nu),
+//   d_s(c) = min over that plane's rectangle of sigma T^(s)(g) - c_s . g,
+// and t_b depends only on the block cell while d_s depends only on the
+// rectangle. Tabulating both makes testing one region against one cached
+// courier eight lookups. A region is skipped only when a concrete feasible
+// courier for it has been exhibited, so skipping is sound by construction.
+struct CachedCourier {
+  std::array<double, 2 * kSubsystemCount> c{};
+  // t_hat[b][j_b]. Rebuilt every sweep, because it depends on z.
+  std::array<std::vector<double>, kBlockCount> t_hat;
+  // d_hat[s][rect * cand_stride + rho]. Built once: it does not depend on z.
+  std::array<std::vector<double>, kSubsystemCount> d_hat;
+  int cand_stride = 1;
+};
+
 // Phase-I result of one region, with the multipliers the Benders cut needs.
 struct SubproblemResult {
   double zeta = 0.0;
   double kappa = 0.0;
+  // The courier itself: c_s[k] at 2*s+k, d_s at s. Kept so that a courier that
+  // certified one region can be re-tested against others without an LP.
+  std::array<double, 2 * kSubsystemCount> c{};
+  std::array<double, kSubsystemCount> d{};
   // Per block, one entry per unique vertex of that block's cell.
   std::array<std::vector<double>, kBlockCount> lambda;
   // Per emitted group-2 row, in order, together with its (plane, pool index).
@@ -447,33 +563,34 @@ SubproblemResult solveRegionSubproblem(
           if (split.block[static_cast<std::size_t>(k)] != b) {
             continue;
           }
-          sindex.push_back(3 * s + k);
-          svalue.push_back(nu(split.local[static_cast<std::size_t>(k)]));
+          pushEntry(sindex, svalue, 3 * s + k,
+                    nu(split.local[static_cast<std::size_t>(k)]));
         }
       }
       sindex.push_back(subTCol(b));
       svalue.push_back(1.0);
       sstart.push_back(static_cast<int>(sindex.size()));
-      slower.push_back(sigma
-                       * impl.valueAtBlock(tgt, b,
-                                           js[static_cast<std::size_t>(b)], nu,
-                                           z));
+      slower.push_back(snapBound(
+          sigma
+          * impl.valueAtBlock(tgt, b, js[static_cast<std::size_t>(b)], nu, z)));
       supper.push_back(kInf);
     }
   }
 
-  // Coupling: sum_b t_b - sum_s d_s - zeta <= 0.
+  // Coupling: sum_b t_b - sum_s d_s - zeta <= 0. Column indices are emitted in
+  // ascending order, like every other row here: HiGHS assesses the matrix on
+  // the way in and an out-of-order row is not accepted.
   const int coup_row = static_cast<int>(slower.size());
-  for (int b = 0; b < kBlockCount; ++b) {
-    sindex.push_back(subTCol(b));
-    svalue.push_back(1.0);
-  }
   for (int s = 0; s < kSubsystemCount; ++s) {
     sindex.push_back(3 * s + 2);
     svalue.push_back(-1.0);
   }
   sindex.push_back(kSubZetaCol);
   svalue.push_back(-1.0);
+  for (int b = 0; b < kBlockCount; ++b) {
+    sindex.push_back(subTCol(b));
+    svalue.push_back(1.0);
+  }
   sstart.push_back(static_cast<int>(sindex.size()));
   slower.push_back(-kInf);
   supper.push_back(0.0);
@@ -494,15 +611,13 @@ SubproblemResult solveRegionSubproblem(
     for (int e = data.rect_begin[s][static_cast<std::size_t>(rect)];
          e < data.rect_end[s][static_cast<std::size_t>(rect)]; ++e) {
       const ClipVertex& cv = data.pool[s][static_cast<std::size_t>(e)];
-      sindex.push_back(3 * s + 0);
-      svalue.push_back(cv.gx);
-      sindex.push_back(3 * s + 1);
-      svalue.push_back(cv.gy);
+      pushEntry(sindex, svalue, 3 * s + 0, cv.gx);
+      pushEntry(sindex, svalue, 3 * s + 1, cv.gy);
       sindex.push_back(3 * s + 2);
       svalue.push_back(1.0);
       sstart.push_back(static_cast<int>(sindex.size()));
       slower.push_back(-kInf);
-      supper.push_back(sigma * target_value(s, e));
+      supper.push_back(snapBound(sigma * target_value(s, e)));
       out.group2.emplace_back(s, e);
     }
   }
@@ -513,31 +628,49 @@ SubproblemResult solveRegionSubproblem(
   std::vector<double> schi(static_cast<std::size_t>(kSubCols), kInf);
   sclo[static_cast<std::size_t>(kSubZetaCol)] = 0.0;
 
+  // Ladder for the subproblem: serial dual, then primal, then presolve on.
+  static constexpr std::array<SimplexAttempt, 3> kSubLadder
+      = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4},
+         SimplexAttempt{true, 0}};
+
   Highs sub;
-  // presolve off: 19 columns make it pure overhead, and it removes any question
-  // about postsolve dual recovery, which the cut depends on.
-  applyHighsOptions(sub, verbose, /*presolve=*/false);
-  if (sub.addCols(kSubCols, sobj.data(), sclo.data(), schi.data(), 0, nullptr,
-                  nullptr, nullptr)
-      != HighsStatus::kOk) {
-    throw std::runtime_error("CourierBorderSolver: sub addCols failed");
-  }
-  if (sub.addRows(static_cast<int>(slower.size()), slower.data(),
-                  supper.data(), static_cast<int>(svalue.size()),
-                  sstart.data(), sindex.data(), svalue.data())
-      != HighsStatus::kOk) {
-    throw std::runtime_error("CourierBorderSolver: sub addRows failed");
-  }
-  if (sub.run() != HighsStatus::kOk
-      || sub.getModelStatus() != HighsModelStatus::kOptimal) {
+  HighsStatus run_status = HighsStatus::kError;
+  if (!solveWithFallback(sub, kSubLadder, verbose, kSubCols, sobj.data(),
+                         sclo.data(), schi.data(),
+                         static_cast<int>(slower.size()), slower.data(),
+                         supper.data(), static_cast<int>(svalue.size()),
+                         sstart.data(), sindex.data(), svalue.data(),
+                         &run_status)) {
+    // Rebuild the same model with logging on: a subproblem that defeats every
+    // rung is rare and worth explaining once rather than reporting as a bare
+    // status code.
+    Highs loud;
+    HighsStatus ignored = HighsStatus::kError;
+    static constexpr std::array<SimplexAttempt, 1> kLoud
+        = {SimplexAttempt{false, 1}};
+    solveWithFallback(loud, kLoud, /*verbose=*/true, kSubCols, sobj.data(),
+                      sclo.data(), schi.data(),
+                      static_cast<int>(slower.size()), slower.data(),
+                      supper.data(), static_cast<int>(svalue.size()),
+                      sstart.data(), sindex.data(), svalue.data(), &ignored);
     throw std::runtime_error(std::format(
         "CourierBorderSolver: subproblem of block cells ({}, {}, {}) not "
-        "optimal, status {}",
-        js[0], js[1], js[2], static_cast<int>(sub.getModelStatus())));
+        "optimal after {} attempts; run status {}, model status {}, rows {}, "
+        "columns {}",
+        js[0], js[1], js[2], kSubLadder.size(), static_cast<int>(run_status),
+        static_cast<int>(sub.getModelStatus()), slower.size(), kSubCols));
   }
 
   const auto& ssol = sub.getSolution();
   out.zeta = ssol.col_value[static_cast<std::size_t>(kSubZetaCol)];
+  for (int s2 = 0; s2 < kSubsystemCount; ++s2) {
+    for (int k = 0; k < 2; ++k) {
+      out.c[static_cast<std::size_t>(2 * s2 + k)]
+          = ssol.col_value[static_cast<std::size_t>(3 * s2 + k)];
+    }
+    out.d[static_cast<std::size_t>(s2)]
+        = ssol.col_value[static_cast<std::size_t>(3 * s2 + 2)];
+  }
   if (!want_duals) {
     return out;
   }
@@ -805,6 +938,14 @@ void CourierBorderSolver::prepare(
         }
       }
 
+      for (std::size_t pair = 0; pair < data.pair_rect[s].size(); ++pair) {
+        if (data.pair_rect[s][pair] < 0) {
+          throw std::runtime_error(std::format(
+              "CourierBorderSolver::prepare: block cell pair {} of source "
+              "plane {} has no rectangle", pair, s));
+        }
+      }
+
       logger_->info(
           "courier prepare: target_phase={} source_plane={} block cells={}x{} "
           "pairs={} rectangles={} clip_vertices={}",
@@ -896,6 +1037,7 @@ std::vector<double> CourierBorderSolver::solve(
 
   std::vector<int> rho_of_region;
   if (!is_upper) {
+    const auto rho_started_at = std::chrono::steady_clock::now();
     rho_of_region.assign(static_cast<std::size_t>(n_regions), 0);
     for (int j = 0; j < n_regions; ++j) {
       const Eigen::VectorXd centroid
@@ -914,6 +1056,12 @@ std::vector<double> CourierBorderSolver::solve(
       }
       rho_of_region[static_cast<std::size_t>(j)] = best;
     }
+    logger_->info(
+        "courier rho selection: {} regions x {} candidates in {:.1f}s",
+        n_regions, n_cand,
+        std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                      - rho_started_at)
+            .count());
   }
 
   // Target value T_j^(s)(g) for one region and one source plane.
@@ -1012,18 +1160,25 @@ std::vector<double> CourierBorderSolver::solve(
   std::vector<double> row_upper;
   const double kInf = std::numeric_limits<double>::infinity();
 
+  // Master rows are Benders cuts and seeds. Snapping a coefficient or a bound
+  // that HiGHS would drop anyway cannot cost soundness: the master only
+  // proposes z, and every proposal is certified against the exact subproblems
+  // before solve() returns.
   auto appendRow = [&](const SparseVec& row, double bound) {
     for (std::size_t k = 0; k < row.cols.size(); ++k) {
+      if (std::abs(row.vals[k]) <= kHighsSmallMatrixValue) {
+        continue;
+      }
       row_index.push_back(row.cols[k]);
       row_value.push_back(row.vals[k]);
     }
     row_start.push_back(static_cast<int>(row_index.size()));
     if (is_upper) {
-      row_lower.push_back(bound);
+      row_lower.push_back(snapBound(bound));
       row_upper.push_back(kInf);
     } else {
       row_lower.push_back(-kInf);
-      row_upper.push_back(bound);
+      row_upper.push_back(snapBound(bound));
     }
   };
 
@@ -1074,34 +1229,194 @@ std::vector<double> CourierBorderSolver::solve(
     }
   }
 
-  CourierBorderStats local_stats;
   std::vector<double> z(static_cast<std::size_t>(n_cols), 0.0);
+
+  // ---- certificate screening -------------------------------------------
+  // sigma * T^(s)(g) for every clip vertex and every candidate. Independent of
+  // z and of the region, so it is built once per call.
+  const int cand_stride = is_upper ? 1 : n_cand;
+  std::array<std::vector<double>, kSubsystemCount> sigma_T;
+  for (int s = 0; s < kSubsystemCount; ++s) {
+    const std::size_t n_pool = data.pool[s].size();
+    sigma_T[s].resize(n_pool * static_cast<std::size_t>(cand_stride));
+    for (std::size_t e = 0; e < n_pool; ++e) {
+      if (is_upper) {
+        sigma_T[s][e] = sigma * upper_T[s][e];
+      } else {
+        for (int c = 0; c < n_cand; ++c) {
+          sigma_T[s][e * static_cast<std::size_t>(cand_stride)
+                     + static_cast<std::size_t>(c)]
+              = sigma * data.pool[s][e].eval(request.candidates[
+                  static_cast<std::size_t>(c)]);
+        }
+      }
+    }
+  }
+
+  // sigma * V_b(nu; z) for every block cell vertex. Rebuilt every sweep.
+  std::array<std::vector<std::vector<double>>, kBlockCount> sigma_V;
+  auto refreshSigmaV = [&]() {
+    for (int b = 0; b < kBlockCount; ++b) {
+      const int m = data.block_regions[static_cast<std::size_t>(b)];
+      sigma_V[static_cast<std::size_t>(b)].assign(
+          static_cast<std::size_t>(m), {});
+      for (int j = 0; j < m; ++j) {
+        const auto& verts = data.block_vertices[static_cast<std::size_t>(b)][
+            static_cast<std::size_t>(j)];
+        auto& out = sigma_V[static_cast<std::size_t>(b)][
+            static_cast<std::size_t>(j)];
+        out.resize(verts.size());
+        for (std::size_t i = 0; i < verts.size(); ++i) {
+          out[i] = sigma * impl.valueAtBlock(tgt, b, j, verts[i], z);
+        }
+      }
+    }
+  };
+
+  auto buildDHat = [&](CachedCourier& courier) {
+    courier.cand_stride = cand_stride;
+    for (int s = 0; s < kSubsystemCount; ++s) {
+      const std::size_t n_rects = data.rect_begin[s].size();
+      courier.d_hat[s].assign(
+          n_rects * static_cast<std::size_t>(cand_stride),
+          std::numeric_limits<double>::infinity());
+      for (std::size_t r = 0; r < n_rects; ++r) {
+        for (int e = data.rect_begin[s][r]; e < data.rect_end[s][r]; ++e) {
+          const ClipVertex& cv = data.pool[s][static_cast<std::size_t>(e)];
+          const double shift
+              = courier.c[static_cast<std::size_t>(2 * s + 0)] * cv.gx
+                + courier.c[static_cast<std::size_t>(2 * s + 1)] * cv.gy;
+          for (int c = 0; c < cand_stride; ++c) {
+            double& slot = courier.d_hat[s][r * static_cast<std::size_t>(
+                cand_stride) + static_cast<std::size_t>(c)];
+            slot = std::min(
+                slot,
+                sigma_T[s][static_cast<std::size_t>(e)
+                               * static_cast<std::size_t>(cand_stride)
+                           + static_cast<std::size_t>(c)]
+                    - shift);
+          }
+        }
+      }
+    }
+  };
+
+  auto refreshTHat = [&](CachedCourier& courier) {
+    for (int b = 0; b < kBlockCount; ++b) {
+      const int m = data.block_regions[static_cast<std::size_t>(b)];
+      courier.t_hat[static_cast<std::size_t>(b)].assign(
+          static_cast<std::size_t>(m), -std::numeric_limits<double>::infinity());
+      for (int j = 0; j < m; ++j) {
+        const auto& verts = data.block_vertices[static_cast<std::size_t>(b)][
+            static_cast<std::size_t>(j)];
+        double best = -std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < verts.size(); ++i) {
+          double value = sigma_V[static_cast<std::size_t>(b)][
+              static_cast<std::size_t>(j)][i];
+          for (int s = 0; s < kSubsystemCount; ++s) {
+            const SourcePlaneSplit& split
+                = data.split[static_cast<std::size_t>(s)];
+            for (int k = 0; k < 2; ++k) {
+              if (split.block[static_cast<std::size_t>(k)] != b) {
+                continue;
+              }
+              value -= courier.c[static_cast<std::size_t>(2 * s + k)]
+                       * verts[i](split.local[static_cast<std::size_t>(k)]);
+            }
+          }
+          best = std::max(best, value);
+        }
+        courier.t_hat[static_cast<std::size_t>(b)][
+            static_cast<std::size_t>(j)] = best;
+      }
+    }
+  };
+
+  // Violation of one region under one cached courier.
+  auto screen = [&](const CachedCourier& courier,
+                    const std::array<int, kBlockCount>& js, int rho) {
+    double value = 0.0;
+    for (int b = 0; b < kBlockCount; ++b) {
+      value += courier.t_hat[static_cast<std::size_t>(b)][
+          static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
+    }
+    for (int s = 0; s < kSubsystemCount; ++s) {
+      const SourcePlaneSplit& split = data.split[static_cast<std::size_t>(s)];
+      const int m1
+          = data.block_regions[static_cast<std::size_t>(split.block[1])];
+      const std::size_t pair
+          = static_cast<std::size_t>(js[static_cast<std::size_t>(
+                split.block[0])])
+                * m1
+            + static_cast<std::size_t>(js[static_cast<std::size_t>(
+                split.block[1])]);
+      const std::size_t rect
+          = static_cast<std::size_t>(data.pair_rect[s][pair]);
+      value -= courier.d_hat[s][rect * static_cast<std::size_t>(cand_stride)
+                                + static_cast<std::size_t>(
+                                    is_upper ? 0 : rho)];
+    }
+    return value;
+  };
+
+  std::vector<CachedCourier> cache;
+  cache.reserve(static_cast<std::size_t>(
+      std::max(0, options_.max_certificate_cache)));
+
+  CourierBorderStats local_stats;
+
+  // A sweep may stop as soon as it has collected enough cuts, and the next one
+  // resumes where it left off. Benders needs violated cuts, not the most
+  // violated ones, and a full pass over 1.6 million regions costs an hour of
+  // subproblems; the return path is unaffected, because returning still
+  // requires one complete pass that finds nothing.
+  //
+  // Regions are visited in a golden-ratio stride rather than in index order.
+  // Consecutive indices differ only in the last block cell, so a contiguous
+  // scan would feed the master hundreds of cuts about one corner of the domain
+  // and let it zigzag everywhere else. The stride is coprime with the region
+  // count, so a full pass still visits every region exactly once.
+  int sweep_cursor = 0;
+  int sweep_stride = std::max(
+      1, static_cast<int>(static_cast<double>(n_regions) * 0.6180339887));
+  while (std::gcd(sweep_stride, n_regions) != 1) {
+    ++sweep_stride;
+    if (sweep_stride >= n_regions) {
+      sweep_stride = 1;
+      break;
+    }
+  }
 
   for (int iter = 0; iter < options_.max_iterations; ++iter) {
     local_stats.iterations = iter + 1;
 
+    // The master grows by up to max_cuts_per_iteration rows an iteration and
+    // is as badly scaled as the subproblem, so it gets the same ladder. The
+    // parallel dual simplex is the right first choice here -- unlike on the
+    // 19-column subproblem -- because the master really does have thousands of
+    // rows by the later iterations.
+    static constexpr std::array<SimplexAttempt, 3> kMasterLadder
+        = {SimplexAttempt{true, 2}, SimplexAttempt{true, 1},
+           SimplexAttempt{false, 4}};
+
     Highs master;
-    applyHighsOptions(master, options_.highs_verbose, /*presolve=*/true);
-    if (master.addCols(n_cols, obj.data(), col_lower.data(), col_upper.data(), 0,
-                       nullptr, nullptr, nullptr)
-        != HighsStatus::kOk) {
-      throw std::runtime_error("CourierBorderSolver::solve: master addCols failed");
+    HighsStatus master_status = HighsStatus::kError;
+    if (!solveWithFallback(
+            master, kMasterLadder, options_.highs_verbose, n_cols, obj.data(),
+            col_lower.data(), col_upper.data(),
+            static_cast<int>(row_lower.size()), row_lower.data(),
+            row_upper.data(), static_cast<int>(row_value.size()),
+            row_start.data(), row_index.data(), row_value.data(),
+            &master_status)) {
+      throw std::runtime_error(std::format(
+          "CourierBorderSolver::solve: master LP not optimal after {} "
+          "attempts at iteration {}; run status {}, model status {}, rows {}, "
+          "columns {}",
+          kMasterLadder.size(), iter, static_cast<int>(master_status),
+          static_cast<int>(master.getModelStatus()), row_lower.size(),
+          n_cols));
     }
-    const auto n_rows = static_cast<int>(row_lower.size());
-    if (n_rows > 0
-        && master.addRows(n_rows, row_lower.data(), row_upper.data(),
-                          static_cast<int>(row_value.size()), row_start.data(),
-                          row_index.data(), row_value.data())
-               != HighsStatus::kOk) {
-      throw std::runtime_error("CourierBorderSolver::solve: master addRows failed");
-    }
-    if (master.run() != HighsStatus::kOk
-        || master.getModelStatus() != HighsModelStatus::kOptimal) {
-      throw std::runtime_error(
-          "CourierBorderSolver::solve: master LP not optimal, status "
-          + std::to_string(static_cast<int>(master.getModelStatus()))
-          + " at iteration " + std::to_string(iter));
-    }
+
     const auto& sol = master.getSolution();
     for (int i = 0; i < n_cols; ++i) {
       z[static_cast<std::size_t>(i)] = sol.col_value[static_cast<std::size_t>(i)];
@@ -1124,8 +1439,64 @@ std::vector<double> CourierBorderSolver::solve(
     std::vector<Violation> violations;
     double worst = 0.0;
 
-    for (int j = 0; j < n_regions; ++j) {
+    // z moved, so every cached courier's block maxima have to be recomputed.
+    // Their d_hat does not depend on z and is kept.
+    refreshSigmaV();
+    for (CachedCourier& courier : cache) {
+      refreshTHat(courier);
+    }
+    long long screened = 0;
+
+    const auto sweep_started_at = std::chrono::steady_clock::now();
+    auto next_sweep_report_at
+        = sweep_started_at + std::chrono::seconds(10);
+    std::size_t last_hit = 0;
+    int visited = 0;
+    while (visited < n_regions) {
+      const int j = static_cast<int>(
+          (static_cast<long long>(sweep_cursor)
+           + static_cast<long long>(visited) * sweep_stride)
+          % n_regions);
+      ++visited;
+      if (logger_->should_log(spdlog::level::info)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_sweep_report_at) {
+          const double elapsed
+              = std::chrono::duration<double>(now - sweep_started_at).count();
+          logger_->info(
+              "courier sweep: iter={} visited {}/{} ({:.1f}%), {:.0f} "
+              "regions/s, {} screened by {} cached couriers, {} violations, "
+              "worst zeta so far {:.3e}",
+              iter, visited, n_regions,
+              100.0 * static_cast<double>(visited)
+                  / static_cast<double>(n_regions),
+              static_cast<double>(visited) / std::max(1e-9, elapsed), screened,
+              cache.size(), violations.size(), worst);
+          next_sweep_report_at = now + std::chrono::seconds(10);
+        }
+      }
       const std::array<int, kBlockCount> js = impl.decodeRegion(tgt, j);
+      const int rho = is_upper
+                          ? 0
+                          : rho_of_region[static_cast<std::size_t>(j)];
+
+      // Try the cached couriers first, most recently useful one first. Every
+      // one of them is a concrete feasible courier, so a hit certifies this
+      // region outright.
+      bool covered = false;
+      for (std::size_t tries = 0; tries < cache.size(); ++tries) {
+        const std::size_t at = (last_hit + tries) % cache.size();
+        if (screen(cache[at], js, rho) <= options_.certificate_tol) {
+          last_hit = at;
+          covered = true;
+          break;
+        }
+      }
+      if (covered) {
+        ++screened;
+        continue;
+      }
+
       const SubproblemResult sub = solveRegionSubproblem(
           impl, data, tgt, js, sigma, z,
           [&](int s, int e) { return targetValue(j, s, e); },
@@ -1133,6 +1504,17 @@ std::vector<double> CourierBorderSolver::solve(
       ++local_stats.subproblems_solved;
 
       if (sub.zeta <= options_.certificate_tol) {
+        // This courier certifies at least this region; neighbouring regions
+        // share most of their block cells and rectangles, so it usually
+        // certifies many more.
+        if (static_cast<int>(cache.size()) < options_.max_certificate_cache) {
+          CachedCourier courier;
+          courier.c = sub.c;
+          buildDHat(courier);
+          refreshTHat(courier);
+          cache.push_back(std::move(courier));
+          last_hit = cache.size() - 1;
+        }
         continue;
       }
       worst = std::max(worst, sub.zeta);
@@ -1153,8 +1535,9 @@ std::vector<double> CourierBorderSolver::solve(
         double mass = 0.0;
         for (double v : sub.lambda[static_cast<std::size_t>(b)]) {
           if (v < -kDualIdentityTol) {
-            throw std::runtime_error(
-                "CourierBorderSolver::solve: negative lambda multiplier");
+            throw std::runtime_error(std::format(
+                "CourierBorderSolver::solve: negative lambda multiplier {} in "
+                "block {}, zeta {}", v, b, sub.zeta));
           }
           mass += v;
         }
@@ -1168,8 +1551,9 @@ std::vector<double> CourierBorderSolver::solve(
       std::array<double, kSubsystemCount> mu_sum{};
       for (std::size_t i = 0; i < sub.group2.size(); ++i) {
         if (sub.mu[i] < -kDualIdentityTol) {
-          throw std::runtime_error(
-              "CourierBorderSolver::solve: negative mu multiplier");
+          throw std::runtime_error(std::format(
+              "CourierBorderSolver::solve: negative mu multiplier {}, zeta {}",
+              sub.mu[i], sub.zeta));
         }
         mu_sum[static_cast<std::size_t>(sub.group2[i].first)] += sub.mu[i];
       }
@@ -1268,11 +1652,31 @@ std::vector<double> CourierBorderSolver::solve(
             + std::to_string(sub.zeta));
       }
       violations.push_back(Violation{sub.zeta, std::move(row), rhs});
+      if (static_cast<int>(violations.size())
+          >= options_.max_cuts_per_iteration) {
+        break;
+      }
     }
+    sweep_cursor = static_cast<int>(
+        (static_cast<long long>(sweep_cursor)
+         + static_cast<long long>(visited) * sweep_stride)
+        % n_regions);
+    const bool full_pass = visited == n_regions;
 
+    logger_->info(
+        "courier sweep: iter={} visited {} regions in {:.1f}s, {} screened by "
+        "{} cached couriers, worst zeta {:.3e}, violations {}",
+        iter, visited,
+        std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                      - sweep_started_at)
+            .count(),
+        screened, cache.size(), worst, violations.size());
+    // Over the visited prefix only, when the sweep stopped early.
     local_stats.worst_zeta = worst;
 
-    if (violations.empty()) {
+    // Returning requires a complete pass that found nothing. A partial pass
+    // proves nothing about the regions it did not reach.
+    if (full_pass && violations.empty()) {
       if (stats != nullptr) {
         *stats = local_stats;
       }

@@ -52,7 +52,10 @@ TEST(user_algo, compute_triangle_areas_vertices) {
   hcpwa::TriangleAreasVerticesResult result
       = hcpwa::compute_triangle_areas_vertices(
           N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min,
-          f5min, f8min, f2max, f3max, f5max, f8max);
+          f5min, f8min, f2max, f3max, f5max, f8max, /*verbose=*/false,
+          // These two are the regression coverage of the 8D product assembly,
+          // which production no longer builds.
+          {/*build_8d_vertices=*/true});
 
   // Print triangle sizes for phase 0
   GTEST_COUT << "result.triangles31.size(): " << result.triangles31.size()
@@ -281,7 +284,10 @@ TEST(user_algo, compute_areas_vertices_exhaustive) {
   hcpwa::TriangleAreasVerticesResult result
       = hcpwa::compute_triangle_areas_vertices(
           N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min,
-          f5min, f8min, f2max, f3max, f5max, f8max);
+          f5min, f8min, f2max, f3max, f5max, f8max, /*verbose=*/false,
+          // These two are the regression coverage of the 8D product assembly,
+          // which production no longer builds.
+          {/*build_8d_vertices=*/true});
 }
 // Regression test for the 8D area assembly in compute_intersection_points().
 //
@@ -318,7 +324,10 @@ TEST(user_algo, area_vertices_are_the_full_product_of_group_cells) {
   const hcpwa::PhaseIntersectionResult result = hcpwa::compute_intersection_points(
       prism({0, 2}), prism({2, 5}), prism({1, 3}), prism({1, 6}), prism({4, 7}),
       prism({0, 4}), prism({4, 6}), prism({3, 7}), prism({5, 7}), prism({1, 2}),
-      tris, tris, N, /*verbose=*/false);
+      tris, tris, N, /*verbose=*/false,
+      // This regression is about the 8D product itself, which is off by
+      // default now.
+      {/*build_8d_vertices=*/true});
 
   // Independently rebuild each 3D group cell the way computend() does, so the
   // expected factor sizes come from the geometry rather than from the code

@@ -171,7 +171,9 @@ TEST(barycentric_block_geometry, prism_ids_are_the_block_triangle_ids) {
 TEST(barycentric_block_geometry, product_of_block_vertices_is_the_8d_region) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
-  const hcpwa::PhaseIntersectionResult result = buildFixture({});
+  // The 8D product is off in production; this test is the reason it still
+  // exists, so it asks for it explicitly.
+  const hcpwa::PhaseIntersectionResult result = buildFixture({true});
 
   // The one place the block path and the 8D path are compared directly. After
   // the 8D product is removed this test is what still pins the scatter rule
@@ -247,7 +249,7 @@ TEST(barycentric_block_geometry, block_aabb_bounds_its_own_vertices) {
 TEST(barycentric_block_geometry, skipping_the_8d_product_keeps_the_blocks) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
-  const hcpwa::PhaseIntersectionResult full = buildFixture({});
+  const hcpwa::PhaseIntersectionResult full = buildFixture({true});
   hcpwa::TriangleGeometryOptions options;
   options.build_8d_vertices = false;
   const hcpwa::PhaseIntersectionResult lean = buildFixture(options);

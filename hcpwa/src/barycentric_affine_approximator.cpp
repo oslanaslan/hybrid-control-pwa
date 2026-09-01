@@ -430,9 +430,17 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
 
   for (int phase = 0; phase < kPhases; ++phase) {
     const auto& geometry = phase_geometries_[phase];
-    if (geometry.region_vertices.size() != geometry.region_triangle_ids.size()) {
+    // region_vertices is the 8D product of the block cells. Nothing in the LP
+    // or the border solver reads it any more, so it is normally empty; when a
+    // test asks for it, it must line up with the region list.
+    if (!geometry.region_vertices.empty()
+        && geometry.region_vertices.size()
+               != geometry.region_triangle_ids.size()) {
       throw std::runtime_error(
           "Barycentric geometry has mismatched region vertices and ids.");
+    }
+    if (geometry.region_triangle_ids.empty()) {
+      throw std::runtime_error("Barycentric geometry has no regions.");
     }
 
     BarycentricVarLayout layout;
@@ -572,83 +580,6 @@ SparseVec BarycentricAffineApproximator::buildPhiRowBlock(
   return barycentric_affine_approximator::buildPhiRowBlock(
       phase_geometries_[phase], layouts_[phase], block, block_region, point,
       tolerance);
-}
-
-std::vector<int> BarycentricAffineApproximator::locateRegions(
-    int phase, const Eigen::VectorXd& point, double tolerance) const {
-  if (phase < 0 || phase >= kPhases) {
-    throw std::invalid_argument("locateRegions: invalid phase");
-  }
-  if (point.size() != kSpaceDim) {
-    throw std::invalid_argument("locateRegions: point must be 8-dimensional");
-  }
-
-  std::vector<int> matches;
-  const auto& geometry = phase_geometries_[phase];
-  for (int region = 0;
-       region < static_cast<int>(geometry.region_triangle_ids.size());
-       ++region) {
-    bool contains = true;
-    const auto& triangle_ids = geometry.region_triangle_ids[region];
-    for (int s = 0; s < kSubsystemCount && contains; ++s) {
-      const int triangle_id = triangle_ids[s];
-      const auto& layer = geometry.layers[s];
-      if (triangle_id < 0
-          || triangle_id >= static_cast<int>(layer.bases.size())) {
-        throw std::runtime_error("locateRegions: triangle id out of range");
-      }
-      const auto& basis = layer.bases[triangle_id];
-      Eigen::Vector2d projected;
-      projected(0) = point(layer.axes[0]);
-      projected(1) = point(layer.axes[1]);
-      const Eigen::Vector3d alpha = basis.H * projected + basis.h;
-      if (std::abs(alpha.sum() - 1.0) > tolerance) {
-        contains = false;
-        break;
-      }
-      for (int local_vertex = 0; local_vertex < 3; ++local_vertex) {
-        if (alpha(local_vertex) < -tolerance
-            || alpha(local_vertex) > 1.0 + tolerance) {
-          contains = false;
-          break;
-        }
-      }
-    }
-    if (contains) {
-      matches.push_back(region);
-    }
-  }
-  return matches;
-}
-
-double BarycentricAffineApproximator::evaluateBarycentricValue(
-    int phase, const std::vector<double>& x, const Eigen::VectorXd& point,
-    double tolerance) const {
-  const auto& layout = layouts_[phase];
-  if (x.size() != static_cast<std::size_t>(layout.num_x)) {
-    throw std::invalid_argument("evaluateBarycentricValue: x size must be "
-                                + std::to_string(layout.num_x));
-  }
-
-  const std::vector<int> matches = locateRegions(phase, point, tolerance);
-  if (matches.empty()) {
-    throw std::runtime_error(
-        "evaluateBarycentricValue: point is outside phase partition");
-  }
-
-  double min_value = std::numeric_limits<double>::infinity();
-  double max_value = -std::numeric_limits<double>::infinity();
-  for (int region : matches) {
-    const double value = buildPhiRow(phase, region, point, tolerance).dot(x);
-    min_value = std::min(min_value, value);
-    max_value = std::max(max_value, value);
-  }
-
-  if (max_value - min_value > 10.0 * tolerance) {
-    throw std::runtime_error(
-        "evaluateBarycentricValue: inconsistent boundary-region values");
-  }
-  return max_value;
 }
 
 std::vector<int> BarycentricAffineApproximator::admissibleThetaIds(
@@ -864,34 +795,6 @@ BoxRegionData BarycentricAffineApproximator::boxDataForCells(
   out.qr_diag = (upper_diag - lower_diag) / 2.0;
   out.qr_off = (upper_off - lower_off) / 2.0;
   return out;
-}
-
-std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-BarycentricAffineApproximator::getAMatrFVecGVecAndGScalJ(
-    int j, int phase) const {
-  std::vector<int> cells(kSpaceDim);
-  std::iota(cells.begin(), cells.end(), 0);
-  const CtmRegionData data
-      = ctmDataForCells(phase, cells, areaCentroidCoords(j, phase));
-
-  hcpwa::util::assertShape(data.a, kSpaceDim, kSpaceDim);
-  hcpwa::util::assertShape(data.f, kSpaceDim);
-  hcpwa::util::assertShape(data.g_vec, kSpaceDim);
-  return std::make_tuple(data.a, data.f, data.g_vec, data.g_scal);
-}
-
-std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd, Eigen::VectorXd>
-BarycentricAffineApproximator::getQQForArea(int j, int phase) const {
-  std::vector<int> cells(kSpaceDim);
-  std::iota(cells.begin(), cells.end(), 0);
-  const BoxRegionData data
-      = boxDataForCells(cells, areaCentroidCoords(j, phase));
-
-  Eigen::MatrixXd Q_c = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Eigen::MatrixXd Q_r = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Q_c.diagonal() = data.qc_diag;
-  Q_r.diagonal() = data.qr_diag;
-  return std::make_tuple(Q_c, data.qc_off, Q_r, data.qr_off);
 }
 
 Eigen::VectorXd BarycentricAffineApproximator::blockCentroidCoords(

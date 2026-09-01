@@ -944,7 +944,9 @@ PhaseIntersectionResult compute_intersection_points(
          i247++) {
       // auto t_start = std::chrono::high_resolution_clock::now();
       for (size_t i58 = 0; i58 < triangles58.size(); i58++) {
-        intersection_points_phase0.emplace_back();
+        if (options.build_8d_vertices) {
+          intersection_points_phase0.emplace_back();
+        }
         intersection_prism_indices_phase0.emplace_back();
         const auto& indices_136 = intersection_prism_indices_136[i136];
         const auto& indices_247 = intersection_prism_indices_247[i247];
@@ -1034,7 +1036,9 @@ PhaseIntersectionResult compute_intersection_points(
     for (size_t i468 = 0; i468 < intersection_prism_indices_468.size();
          i468++) {
       for (size_t i23 = 0; i23 < triangles23.size(); i23++) {
-        intersection_points_phase1.emplace_back();
+        if (options.build_8d_vertices) {
+          intersection_points_phase1.emplace_back();
+        }
         intersection_prism_indices_phase1.emplace_back();
         const auto& indices_157 = intersection_prism_indices_157[i157];
         const auto& indices_468 = intersection_prism_indices_468[i468];

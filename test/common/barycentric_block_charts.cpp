@@ -67,7 +67,9 @@ hcpwa::PhaseIntersectionResult buildFixture() {
       prismsFor(tris, ax0[0]), prismsFor(tris, ax0[1]), prismsFor(tris, ax0[2]),
       prismsFor(tris, ax0[3]), prismsFor(tris, ax0[4]), prismsFor(tris, ax1[0]),
       prismsFor(tris, ax1[1]), prismsFor(tris, ax1[2]), prismsFor(tris, ax1[3]),
-      prismsFor(tris, ax1[4]), tris, tris, kN, /*verbose=*/false, {});
+      prismsFor(tris, ax1[4]), tris, tris, kN, /*verbose=*/false,
+      // The product path is what this file compares the block path against.
+      {/*build_8d_vertices=*/true});
 }
 
 // Mirrors the basis construction in getIntersectionPoints(): invert

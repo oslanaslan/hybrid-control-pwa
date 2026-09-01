@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 #include <Highs.h>
@@ -66,6 +67,9 @@ TEST(barycentric_block_system,
   barycentric_affine_approximator::BarycentricAffineApproximator approximator(
       /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
       /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
+  hcpwa::TriangleGeometryOptions options;
+  options.build_8d_vertices = true;
+  approximator.setGeometryOptions(options);
   approximator.getIntersectionPoints();
   approximator.precomputeMatrices();
 }
@@ -151,4 +155,48 @@ TEST(barycentric_block_system, courier_certifies_on_real_geometry) {
   solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
                  approximator.nodeWeights(), 100.0);
   ASSERT_TRUE(solver.prepared());
+}
+
+// Runs the border problem to convergence on production-shaped geometry.
+// Disabled by default: it is minutes of work, and it is the gate that says the
+// courier method is usable at this scale, not a unit test. Run it with
+//   --gtest_also_run_disabled_tests --gtest_filter='*courier_converges*'
+TEST(barycentric_block_system, DISABLED_courier_converges_on_real_geometry) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  barycentric_affine_approximator::BarycentricAffineApproximator approximator(
+      /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
+      /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
+  hcpwa::TriangleGeometryOptions options;
+  options.build_8d_vertices = false;
+  approximator.setGeometryOptions(options);
+  approximator.getIntersectionPoints();
+
+  barycentric_affine_approximator::CourierBorderOptions courier_options;
+  // Deliberately generous: the point of this run is to find out how many
+  // Benders iterations the border problem actually needs at this scale. Every
+  // other option is left at its production default.
+  courier_options.max_iterations = 400;
+  barycentric_affine_approximator::CourierBorderSolver solver(courier_options);
+  solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
+                 approximator.nodeWeights(), 100.0);
+
+  const int num_x = approximator.layouts()[1].num_x;
+  const std::vector<std::vector<double>> candidates
+      = {std::vector<double>(static_cast<std::size_t>(num_x), 0.2),
+         std::vector<double>(static_cast<std::size_t>(num_x), -0.1)};
+  barycentric_affine_approximator::CourierBorderRequest request;
+  request.target_phase = 0;
+  request.source_phase = 1;
+  request.candidates = candidates;
+
+  barycentric_affine_approximator::CourierBorderStats stats;
+  const std::vector<double> z = solver.solve(
+      request, barycentric_affine_approximator::ApproximationMode::Lower,
+      &stats);
+  EXPECT_EQ(static_cast<int>(z.size()), approximator.layouts()[0].num_x);
+  GTEST_LOG_(INFO) << "converged in " << stats.iterations << " iterations, "
+                   << stats.cuts_added << " cuts, "
+                   << stats.subproblems_solved << " subproblems";
 }

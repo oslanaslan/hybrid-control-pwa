@@ -59,6 +59,16 @@ struct CourierBorderOptions {
   // Rows of the seeded master relaxation. 0 disables seeding.
   int max_seed_rows = 8192;
 
+  // Couriers kept as screens during a region sweep. A courier that certifies
+  // one region very often certifies its neighbours, and re-testing a cached
+  // one costs eight lookups against a subproblem solve. 0 disables screening.
+  //
+  // This is what makes the sweep affordable at all: every region still has to
+  // be certified, but only the ones no cached courier covers pay for an LP.
+  // Skipping is sound by construction -- a region is skipped only when a
+  // concrete feasible courier for it has been exhibited.
+  int max_certificate_cache = 64;
+
   // Safety factor on the data-derived master column box.
   double master_box_scale = 8.0;
 

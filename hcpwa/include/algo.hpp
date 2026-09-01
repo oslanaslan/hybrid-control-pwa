@@ -115,11 +115,14 @@ struct PhaseIntersectionResult {
 // Options of the triangle geometry path.
 struct TriangleGeometryOptions {
   // Materialise intersection_points_phase{0,1}, the full 8D product of the
-  // block cells. It is what the LP used to be assembled from and costs
-  // prod_b |V_b| vertices per region; the block factorisation costs the sum.
+  // block cells. Nothing reads it any more: the LP and the border solver are
+  // both assembled block by block. It costs prod_b |V_b| vertices per region --
+  // 90 million on the N=100 arrangement, where the block factors come to 2 639
+  // -- so it is off by default and exists for tests that compare the two paths.
+  //
   // The prism index lists are always built: they are five integers per region
   // and they carry the triangle ids the barycentric charts are selected by.
-  bool build_8d_vertices = true;
+  bool build_8d_vertices = false;
 };
 
 // Structure to hold computation results for areas vertices

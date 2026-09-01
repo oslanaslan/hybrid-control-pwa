@@ -160,13 +160,6 @@ class BarycentricAffineApproximator {
                              const Eigen::VectorXd& point,
                              double tolerance = kEps) const;
 
-  std::vector<int> locateRegions(int phase, const Eigen::VectorXd& point,
-                                 double tolerance = kEps) const;
-
-  double evaluateBarycentricValue(int phase, const std::vector<double>& x,
-                                  const Eigen::VectorXd& point,
-                                  double tolerance = kEps) const;
-
   std::vector<int> admissibleThetaIds(double theta) const;
 
   // s of step 2.1: the single parameter separating the two approximation
@@ -222,17 +215,10 @@ class BarycentricAffineApproximator {
 
   Eigen::VectorXd areaCentroidCoords(int j, int phase) const;
 
-  std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-  getAMatrFVecGVecAndGScalJ(int j, int phase) const;
-
-  std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd,
-             Eigen::VectorXd>
-  getQQForArea(int j, int phase) const;
-
-  // The two assemblers above, restricted to a set of cells. Both the full 8D
-  // path and the per-block path go through these, so the two cannot drift.
-  // n must carry the coordinates of every cell in `cells`; the rest may be
-  // anything, including NaN.
+  // The CTM drift and the disturbance box of one region, restricted to a set
+  // of cells. Both the full 8D path and the per-block path go through these,
+  // so the two cannot drift. n must carry the coordinates of every cell in
+  // `cells`; the rest may be anything, including NaN.
   CtmRegionData ctmDataForCells(int phase, const std::vector<int>& cells,
                                 const Eigen::VectorXd& n) const;
   BoxRegionData boxDataForCells(const std::vector<int>& cells,

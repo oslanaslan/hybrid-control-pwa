@@ -18,6 +18,7 @@
 #include <future>
 #include <limits>
 #include <numeric>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -61,18 +62,9 @@ Eigen::VectorXd toEigen8(const hcpwa::Vec<8>& v) {
 // ordered by the way compute_intersection_points() combines prisms. These axis
 // arrays must stay in that same order because region_triangle_ids[j][s] selects
 // a triangle in layers[s].
-std::array<std::array<int, 2>, barycentric_affine_approximator::kSubsystemCount>
-projectionAxesForPhase(int phase) {
-  if (phase == 0) {
-    // Phase 0 tuple order: [31, 36, 24, 27, 58].
-    return {{{0, 2}, {2, 5}, {1, 3}, {1, 6}, {4, 7}}};
-  }
-  if (phase == 1) {
-    // Phase 1 tuple order: [51, 57, 84, 86, 23].
-    return {{{0, 4}, {4, 6}, {3, 7}, {5, 7}, {1, 2}}};
-  }
-  throw std::invalid_argument("projectionAxesForPhase: invalid phase");
-}
+// Moved to barycentric_geometry_types.hpp so the courier solver and the tests
+// share one source of truth for this table.
+using barycentric_affine_approximator::projectionAxesForPhase;
 
 // Appends a sparse row to the CSR arrays. This mirrors csrAppendRow() but avoids
 // building dense rows with eta_i + 8M columns, which can be large for the
@@ -491,147 +483,6 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
     }
     layout.num_cols = layout.num_x + kSpaceDim * layout.num_regions;
     layouts_[phase] = layout;
-  }
-
-  // Common-refinement vertices are deduplicated globally, but cell membership is
-  // preserved: the lower-bound border LP selects one family member per cell, so
-  // it needs to know which vertices belong to the same cell (step 2.2, 6.1).
-  common_refinement_vertices_.clear();
-  refinement_cells_.clear();
-  refinement_cells_.reserve(areas_vertices.common_refinement.areas.size());
-  for (const auto& area : areas_vertices.common_refinement.areas) {
-    RefinementCell cell;
-    cell.phase0_area_id = static_cast<int>(area.phase0_area_id);
-    cell.phase1_area_id = static_cast<int>(area.phase1_area_id);
-    cell.vertex_ids.reserve(area.vertices.size());
-
-    for (const auto& vertex : area.vertices) {
-      Eigen::VectorXd g = toEigen8(vertex);
-      for (int d = 0; d < kSpaceDim; ++d) {
-        if (!std::isfinite(g(d))) {
-          throw std::runtime_error(
-              "getIntersectionPoints: non-finite common-refinement vertex");
-        }
-        if (g(d) < -kGeomEps || g(d) > system_params_.N + kGeomEps) {
-          throw std::runtime_error(
-              "getIntersectionPoints: common-refinement vertex outside [0,N]");
-        }
-        if (std::abs(g(d)) <= kGeomEps) {
-          g(d) = 0.0;
-        }
-        if (std::abs(g(d) - system_params_.N) <= kGeomEps) {
-          g(d) = system_params_.N;
-        }
-      }
-
-      int vertex_id = -1;
-      for (int i = 0;
-           i < static_cast<int>(common_refinement_vertices_.size()); ++i) {
-        if ((common_refinement_vertices_[i] - g).norm() <= kGeomEps) {
-          vertex_id = i;
-          break;
-        }
-      }
-      if (vertex_id < 0) {
-        common_refinement_vertices_.push_back(std::move(g));
-        vertex_id = static_cast<int>(common_refinement_vertices_.size() - 1);
-      }
-      cell.vertex_ids.push_back(vertex_id);
-    }
-
-    if (cell.vertex_ids.empty()) {
-      throw std::runtime_error(
-          "getIntersectionPoints: common-refinement cell has no vertices");
-    }
-    refinement_cells_.push_back(std::move(cell));
-  }
-
-  if (common_refinement_vertices_.empty() || refinement_cells_.empty()) {
-    throw std::runtime_error(
-        "getIntersectionPoints: common-refinement test set is empty");
-  }
-
-  // Every border test point must be evaluable in both phase partitions. This
-  // validation is intentionally done during geometry construction so a prism
-  // tuple/order bug fails before any LP coefficients are stored. The phi rows
-  // found here are cached: the border LP runs once per (level, theta, phase).
-  // We use the already stored phase-area ancestors from each refinement cell
-  // instead of searching all phase regions for every deduplicated vertex.
-  for (int phase = 0; phase < kPhases; ++phase) {
-    phi_at_refinement_[phase].clear();
-    phi_at_refinement_[phase].resize(common_refinement_vertices_.size());
-  }
-  std::array<std::vector<bool>, kPhases> phi_initialized;
-  for (int phase = 0; phase < kPhases; ++phase) {
-    phi_initialized[phase].assign(common_refinement_vertices_.size(), false);
-  }
-  for (const RefinementCell& cell : refinement_cells_) {
-    const std::array<int, kPhases> ancestor_regions
-        = {cell.phase0_area_id, cell.phase1_area_id};
-    for (int vertex_id : cell.vertex_ids) {
-      if (vertex_id < 0
-          || vertex_id >= static_cast<int>(common_refinement_vertices_.size())) {
-        throw std::runtime_error(
-            "getIntersectionPoints: refinement cell references invalid vertex id");
-      }
-      const Eigen::VectorXd& g = common_refinement_vertices_[vertex_id];
-      for (int phase = 0; phase < kPhases; ++phase) {
-        if (phi_initialized[phase][vertex_id]) {
-          continue;
-        }
-        const int region = ancestor_regions[phase];
-        SparseVec phi = buildPhiRow(phase, region, g, kEps);
-
-        // Invariant of the barycentric representation: the coordinates of each
-        // of the five projection layers sum to one, hence five in total.
-        double sum = 0.0;
-        for (double value : phi.vals) {
-          if (value < -kEps) {
-            throw std::runtime_error(
-                "getIntersectionPoints: negative barycentric coordinate");
-          }
-          sum += value;
-        }
-        if (std::abs(sum - static_cast<double>(kSubsystemCount)) > 1e-6) {
-          std::ostringstream details;
-          details << "phase=" << phase << ", region=" << region
-                  << ", sum=" << sum << ", expected=" << kSubsystemCount
-                  << ", point=[";
-          for (int d = 0; d < kSpaceDim; ++d) {
-            details << (d == 0 ? "" : ", ") << g(d);
-          }
-          details << "], phi={";
-          for (std::size_t i = 0; i < phi.vals.size(); ++i) {
-            details << (i == 0 ? "" : ", ") << phi.cols[i] << ":"
-                    << phi.vals[i];
-          }
-          details << "}";
-          logger_->error(
-              "getIntersectionPoints: phi row does not sum to "
-              "kSubsystemCount: {}",
-              details.str());
-          throw std::runtime_error(std::format(
-              "getIntersectionPoints: phi row sum {} does not equal {} for phase "
-              "{} region {}",
-              sum, kSubsystemCount, phase, region));
-        }
-
-        phi_at_refinement_[phase][vertex_id] = std::move(phi);
-        phi_initialized[phase][vertex_id] = true;
-      }
-    }
-  }
-  for (int phase = 0; phase < kPhases; ++phase) {
-    for (int vertex_id = 0;
-         vertex_id < static_cast<int>(common_refinement_vertices_.size());
-         ++vertex_id) {
-      if (!phi_initialized[phase][vertex_id]) {
-        throw std::runtime_error(std::format(
-            "getIntersectionPoints: missing cached phi row for phase {} vertex "
-            "{}",
-            phase, vertex_id));
-      }
-    }
   }
 
   computeNodeWeights();
@@ -1345,14 +1196,9 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   if (switch_cnt < 0) {
     throw std::invalid_argument("getBorderConditions: negative switch_cnt");
   }
-  if (common_refinement_vertices_.empty()) {
-    throw std::runtime_error(
-        "getBorderConditions: common-refinement test set is empty");
-  }
 
   const std::vector<int> theta_end_ids = admissibleThetaIds(theta);
   const bool is_upper = approximation_mode_ == ApproximationMode::Upper;
-  const int n_points = static_cast<int>(common_refinement_vertices_.size());
 
   // The family of already computed members, fetched once. Two reasons to hoist
   // it out of the vertex loop instead of refetching per vertex:
@@ -1386,217 +1232,38 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   }
   const int n_candidates = static_cast<int>(candidates.size());
 
-  // val[g][c] = phi^(source)(g)^T u^(c). The upper branch only needs the maximum
-  // over c at each g; the lower branch needs the whole table, because it selects
-  // one member per refinement cell.
-  //
-  // The source-side phi row is the cached one. Calling evaluateBarycentricValue
-  // here instead would relocate g among all source regions on every (g, c) pair,
-  // which is O(#regions) each time. The cached row comes from the same region
-  // that lookup would return, and the barycentric function is continuous across
-  // region boundaries by construction (neighbouring regions share node values),
-  // so the value is the same.
-  std::vector<std::vector<double>> val(
-      static_cast<std::size_t>(n_points),
-      std::vector<double>(static_cast<std::size_t>(n_candidates), 0.0));
-  for (int g_id = 0; g_id < n_points; ++g_id) {
-    const SparseVec& phi_src = phi_at_refinement_[source_phase][g_id];
-    for (int c = 0; c < n_candidates; ++c) {
-      const double val_src = phi_src.dot(candidates[c]);
-      if (!std::isfinite(val_src)) {
-        throw std::runtime_error("getBorderConditions: non-finite source value");
-      }
-      val[g_id][c] = val_src;
-    }
-  }
+  CourierBorderRequest request;
+  request.target_phase = target_phase;
+  request.source_phase = source_phase;
+  request.candidates = std::span<const std::vector<double>>(candidates);
+  request.theta_idx = theta_idx;
+  request.switch_cnt = switch_cnt;
 
-  // Right-hand sides.
-  //
-  // Upper bound: the requirement is  phi^T x_L >= h(g) = max_c val[g][c].
-  // On a refinement cell the left side is affine and h is convex (a max of
-  // affine functions), so their difference is concave and its minimum sits at a
-  // vertex: the vertex rows are exact (step 2.2, section 4).
-  //
-  // Lower bound: the requirement is  phi^T x_L <= h(g), and now the difference
-  // is convex, so vertices are NOT sufficient. Instead one family member is
-  // fixed per cell; both sides are then affine on that cell and vertices become
-  // exact again, while "member <= max" keeps the condition sufficient
-  // (step 2.2, section 6.1). A vertex shared by several cells keeps the
-  // tightest of the bounds it receives.
-  std::vector<double> rhs(static_cast<std::size_t>(n_points));
-  if (is_upper) {
-    for (int g_id = 0; g_id < n_points; ++g_id) {
-      rhs[g_id] = *std::max_element(val[g_id].begin(), val[g_id].end());
-    }
-  } else {
-    std::fill(rhs.begin(), rhs.end(), std::numeric_limits<double>::infinity());
-    for (const RefinementCell& cell : refinement_cells_) {
-      // The member is affine on the cell, so its value at the barycentre of the
-      // cell vertices equals the mean of its vertex values. Picking the member
-      // with the largest mean is a heuristic: it affects tightness only, never
-      // correctness.
-      int best = -1;
-      double best_mean = -std::numeric_limits<double>::infinity();
-      for (int c = 0; c < n_candidates; ++c) {
-        double mean = 0.0;
-        for (int g_id : cell.vertex_ids) {
-          mean += val[g_id][c];
-        }
-        mean /= static_cast<double>(cell.vertex_ids.size());
-        if (mean > best_mean) {
-          best_mean = mean;
-          best = c;
-        }
-      }
-      if (best < 0) {
-        throw std::runtime_error(
-            "getBorderConditions: no family member selected for a cell");
-      }
-      for (int g_id : cell.vertex_ids) {
-        rhs[g_id] = std::min(rhs[g_id], val[g_id][best]);
-      }
-    }
-    for (int g_id = 0; g_id < n_points; ++g_id) {
-      if (!std::isfinite(rhs[g_id])) {
-        throw std::runtime_error(
-            "getBorderConditions: border point belongs to no refinement cell");
-      }
-    }
-  }
+  CourierBorderStats stats;
+  std::vector<double> x_boundary
+      = courier_solver_.solve(request, approximation_mode_, &stats);
 
-  std::vector<int> starts = {0};
-  std::vector<int> col_index;
-  std::vector<double> value;
-  std::vector<double> row_lower;
-  std::vector<double> row_upper;
-  std::vector<SparseVec> phi_rows;
-
-  Highs highs;
-  const double inf = highs.getInfinity();
-
-  row_lower.reserve(static_cast<std::size_t>(n_points));
-  row_upper.reserve(static_cast<std::size_t>(n_points));
-  phi_rows.reserve(static_cast<std::size_t>(n_points));
-
-  // Objective: the integral gap over Omega. Since h does not depend on x_L, that
-  // gap equals w^T x_L up to a constant, with w = integral of phi over Omega.
-  // Minimized for the upper bound, maximized for the lower one; the solver runs
-  // in minimize mode, so the lower branch flips the sign (step 2.2, section 7).
-  //
-  // Note this replaces a plain sum over the refinement vertices: those vertices
-  // are not uniformly spread over Omega, so their sum is not a measure.
-  Eigen::RowVectorXd c_vec = node_weights_[target_phase].transpose();
-  if (!is_upper) {
-    c_vec = -c_vec;
-  }
-
-  for (int g_id = 0; g_id < n_points; ++g_id) {
-    // The target-side row maps target barycentric coefficients to the boundary
-    // value at the common-refinement vertex g. Precomputed with the geometry.
-    const SparseVec& phi = phi_at_refinement_[target_phase][g_id];
-    appendSparseRow(starts, col_index, value, phi, kEps);
-    if (is_upper) {
-      row_lower.push_back(rhs[g_id]);
-      row_upper.push_back(inf);
-    } else {
-      row_lower.push_back(-inf);
-      row_upper.push_back(rhs[g_id]);
-    }
-    phi_rows.push_back(phi);
-  }
-
-  highs.setOptionValue("solver", "simplex");
-  highs.setOptionValue("presolve", "on");
-  highs.setOptionValue("simplex_strategy", 2);
-  highs.setOptionValue("pdlp_optimality_tolerance", kHighsPdlpOptimalityTol);
-  highs.setOptionValue("kkt_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("optimality_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
-  highs.setOptionValue("log_to_console", highs_verbose_);
-  highs.changeObjectiveSense(ObjSense::kMinimize);
-
-  const int n_cols = target_layout.num_x;
-  std::vector<double> col_lower(n_cols, -inf);
-  std::vector<double> col_upper(n_cols, inf);
-
-  // Match initializeHighs(): layer 0 remains free and the first vertex in each
-  // later projection layer is pinned to zero. This removes the additive
-  // barycentric nullspace without changing the represented value function.
-  for (int s = 1; s < kSubsystemCount; ++s) {
-    if (target_layout.eta_s[s] == 0) {
-      throw std::runtime_error(
-          "getBorderConditions: empty target projection layer");
-    }
-    const int col = target_layout.idxX(s, 0);
-    col_lower[col] = 0.0;
-    col_upper[col] = 0.0;
-  }
-
-  HighsStatus st = highs.addCols(
-      n_cols, c_vec.data(), col_lower.data(), col_upper.data(), /*num_nz=*/0,
-      /*start=*/nullptr, /*index=*/nullptr, /*value=*/nullptr);
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.addCols failed");
-  }
-
-  const int n_rows = static_cast<int>(row_lower.size());
-  st = highs.addRows(n_rows, row_lower.data(), row_upper.data(),
-                    static_cast<int>(value.size()), starts.data(),
-                    col_index.data(), value.data());
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.addRows failed");
-  }
-
-  st = highs.run();
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("getBorderConditions: highs.run failed");
-  }
-  if (highs.getModelStatus() != HighsModelStatus::kOptimal) {
-    throw std::runtime_error(
-        "getBorderConditions: LP solution not found, model status: "
-        + std::to_string(static_cast<int>(highs.getModelStatus())));
-  }
-
-  const auto& solution = highs.getSolution();
-  if (solution.col_value.size() < static_cast<std::size_t>(n_cols)) {
-    throw std::runtime_error("getBorderConditions: solution is too short");
-  }
-  std::vector<double> x_boundary(solution.col_value.begin(),
-                                 solution.col_value.begin() + n_cols);
-
-  // Slack is measured in the direction the bound is supposed to hold:
-  // majorization (value - rhs) for the upper branch, minorization (rhs - value)
-  // for the lower one. Either way it must be nonnegative.
-  double min_slack = std::numeric_limits<double>::infinity();
-  double max_slack = -std::numeric_limits<double>::infinity();
-  double sum_slack = 0.0;
-  for (std::size_t i = 0; i < phi_rows.size(); ++i) {
-    const double value_at_g = phi_rows[i].dot(x_boundary);
-    const double slack
-        = is_upper ? (value_at_g - rhs[i]) : (rhs[i] - value_at_g);
-    if (slack < -10.0 * kHighsSolutionTol) {
-      throw std::runtime_error(
-          is_upper
-              ? "getBorderConditions: border LP violates the majorization "
-                "constraint"
-              : "getBorderConditions: border LP violates the minorization "
-                "constraint");
-    }
-    min_slack = std::min(min_slack, slack);
-    max_slack = std::max(max_slack, slack);
-    sum_slack += slack;
-  }
   logger_->info(
-      "Barycentric border LP phase={} source={} theta_idx={} switch_cnt={} "
-      "mode={} points={} candidates={} min_slack={} max_slack={} "
-      "mean_slack={}",
+      "Courier border LP target_phase={} source_phase={} theta_idx={} "
+      "switch_cnt={} mode={} candidates={} iters={} cuts={} subproblems={} "
+      "worst_zeta={:.3e} obj={:.6f} hit_box={}",
       target_phase, source_phase, theta_idx, switch_cnt,
-      is_upper ? "upper" : "lower", phi_rows.size(), n_candidates, min_slack,
-      max_slack, sum_slack / static_cast<double>(phi_rows.size()));
+      approximation_mode_ == ApproximationMode::Upper ? "upper" : "lower",
+      n_candidates, stats.iterations, stats.cuts_added,
+      stats.subproblems_solved, stats.worst_zeta, stats.master_objective,
+      stats.master_hit_box);
+
+  // Opt-in independent re-derivation: rebuilds every region's courier from
+  // scratch rather than trusting the loop that produced x_boundary.
+  if (validate_) {
+    const double residual = courier_solver_.worstCertificateResidual(
+        request, approximation_mode_, x_boundary);
+    if (residual > kResidualValidationTol) {
+      throw std::runtime_error(
+          "getBorderConditions: independent re-verification failed, worst "
+          "certificate residual " + std::to_string(residual));
+    }
+  }
 
   return x_boundary;
 }
@@ -1919,6 +1586,12 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
       "for phase 1",
       phase_geometries_[0].region_vertices.size(),
       phase_geometries_[1].region_vertices.size());
+  courier_options_.highs_verbose = highs_verbose_;
+  courier_solver_ = CourierBorderSolver(courier_options_);
+  courier_solver_.prepare(phase_geometries_, layouts_, node_weights_,
+                          system_params_.N);
+  logger_->info("Finished preparing the courier border solver");
+
   precomputeMatrices();
   logger_->info(
       "Finished precomputeMatrices. Precomputed {} system matrices for phase 0 "

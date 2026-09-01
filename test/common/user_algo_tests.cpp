@@ -22,17 +22,6 @@ hcpwa::Vec<8> MakeUniformVec8(double value) {
   return v;
 }
 
-hcpwa::LineSet<8> MakeUniformBoxPrism(double min_value, double max_value) {
-  hcpwa::AABB<8> box
-      = {MakeUniformVec8(min_value), MakeUniformVec8(max_value)};
-  return hcpwa::AABBBounds(box);
-}
-
-std::vector<hcpwa::Vec<8>> MakeAreaBoundsVertices(double min_value,
-                                                  double max_value) {
-  return {MakeUniformVec8(min_value), MakeUniformVec8(max_value)};
-}
-
 }  // namespace
 
 TEST(user_algo, compute_triangle_areas_vertices) {
@@ -294,93 +283,85 @@ TEST(user_algo, compute_areas_vertices_exhaustive) {
           N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min,
           f5min, f8min, f2max, f3max, f5max, f8max);
 }
-
-TEST(user_algo, common_refinement_box_filter_rejects_non_volume_pairs) {
+// Regression test for the 8D area assembly in compute_intersection_points().
+//
+// Each 8D area is the product of two 3D group cells and one 2D simplex, so its
+// vertex set must be the full product of the three factors. The assembly loops
+// used to be bounded by intersection_prism_indices_*, which always holds
+// exactly the two prism ids that formed the cell, so every area came out with
+// 2 * 2 * 3 = 12 vertices no matter how many vertices the factors really had.
+//
+// Deliberately built on a hand-made one-triangle-per-plane geometry: calling
+// the full pipeline here would run the whole arrangement and is far too slow
+// for a unit test.
+TEST(user_algo, area_vertices_are_the_full_product_of_group_cells) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
 
-  const auto phase0_near = MakeUniformBoxPrism(0.0, 1.0);
-  const auto phase0_far = MakeUniformBoxPrism(3.0, 4.0);
-  const auto phase1_overlap = MakeUniformBoxPrism(0.5, 1.5);
-  const auto phase1_boundary_touch = MakeUniformBoxPrism(4.0, 5.0);
+  constexpr hcpwa::Float N = 10;
 
-  const std::vector<hcpwa::LineSet<8>> phase0_layer
-      = {phase0_near, phase0_far};
-  const std::vector<hcpwa::LineSet<8>> phase1_layer
-      = {phase1_overlap, phase1_boundary_touch};
+  hcpwa::TriangleWithUniqueVertices tri;
+  tri.a = {0, 0};
+  tri.b = {N, 0};
+  tri.c = {0, N};
+  tri.a_index = 0;
+  tri.b_index = 1;
+  tri.c_index = 2;
+  tri.polygon_index = 0;
 
-  const std::vector<std::vector<size_t>> phase0_area_prism_indices
-      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
-  const std::vector<std::vector<size_t>> phase1_area_prism_indices
-      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
-      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(3.0, 4.0)};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
-      = {MakeAreaBoundsVertices(0.5, 1.5), MakeAreaBoundsVertices(4.0, 5.0)};
+  // Phase 0 tuple order [31, 36, 24, 27, 58], phase 1 [51, 57, 84, 86, 23].
+  auto prism = [&tri](std::array<int, 2> dims) {
+    return std::vector<hcpwa::LineSet<8>>{hcpwa::CalcPrism(tri, dims)};
+  };
+  const std::vector<hcpwa::TriangleWithUniqueVertices> tris = {tri};
 
-  hcpwa::CommonRefinementResult result
-      = hcpwa::compute_common_refinement_area_vertices(
-          phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
-          phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
-          phase0_area_prism_indices, phase1_area_prism_indices,
-          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
-          /*verbose=*/false);
+  const hcpwa::PhaseIntersectionResult result = hcpwa::compute_intersection_points(
+      prism({0, 2}), prism({2, 5}), prism({1, 3}), prism({1, 6}), prism({4, 7}),
+      prism({0, 4}), prism({4, 6}), prism({3, 7}), prism({5, 7}), prism({1, 2}),
+      tris, tris, N, /*verbose=*/false);
 
-  ASSERT_EQ(result.areas.size(), 1U);
-
-  bool saw_overlap_pair = false;
-  for (const auto& area : result.areas) {
-    ASSERT_FALSE(area.vertices.empty());
-    if (area.phase0_area_id == 0 && area.phase1_area_id == 0) {
-      saw_overlap_pair = true;
+  // Independently rebuild each 3D group cell the way computend() does, so the
+  // expected factor sizes come from the geometry rather than from the code
+  // under test.
+  const hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
+  auto group_cell_vertices = [&aabb3d](const hcpwa::LineSet<8>& p0,
+                                       const hcpwa::LineSet<8>& p1,
+                                       std::array<int, 3> dims) {
+    hcpwa::LineSet<3> lines = hcpwa::AABBBounds(aabb3d);
+    for (const auto& l : hcpwa::DimensionCast<3, 8>(p0, dims)) {
+      lines.push_back(l);
     }
-  }
-  EXPECT_TRUE(saw_overlap_pair);
-}
+    for (const auto& l : hcpwa::DimensionCast<3, 8>(p1, dims)) {
+      lines.push_back(l);
+    }
+    return hcpwa::LinesToPoints<3>(lines).size();
+  };
 
-TEST(user_algo, common_refinement_box_filter_is_canonical_and_unique) {
-  cddwrap::global_init();
-  defer _ = &cddwrap::global_free;
+  const std::size_t n136 = group_cell_vertices(
+      hcpwa::CalcPrism(tri, {0, 2}), hcpwa::CalcPrism(tri, {2, 5}), {0, 2, 5});
+  const std::size_t n247 = group_cell_vertices(
+      hcpwa::CalcPrism(tri, {1, 3}), hcpwa::CalcPrism(tri, {1, 6}), {1, 3, 6});
 
-  const auto phase0_a = MakeUniformBoxPrism(0.0, 1.0);
-  const auto phase0_b = MakeUniformBoxPrism(0.5, 1.5);
-  const auto phase0_degenerate = MakeUniformBoxPrism(2.0, 2.0);
-  const auto phase1_a = MakeUniformBoxPrism(0.25, 0.75);
-  const auto phase1_b = MakeUniformBoxPrism(0.75, 1.25);
+  ASSERT_EQ(result.intersection_points_phase0.size(), 1U);
+  ASSERT_GT(n136, 2U) << "degenerate fixture: the group cell must have more "
+                         "than the 2 vertices the old bound would emit";
+  ASSERT_GT(n247, 2U);
 
-  const std::vector<hcpwa::LineSet<8>> phase0_layer
-      = {phase0_a, phase0_b, phase0_degenerate};
-  const std::vector<hcpwa::LineSet<8>> phase1_layer = {phase1_a, phase1_b};
+  EXPECT_EQ(result.intersection_points_phase0[0].size(), n136 * n247 * 3)
+      << "phase-0 area is not the full product of its two group cells and the "
+         "2D simplex";
 
-  const std::vector<std::vector<size_t>> phase0_area_prism_indices
-      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}, {2, 2, 2, 2, 2}};
-  const std::vector<std::vector<size_t>> phase1_area_prism_indices
-      = {{0, 0, 0, 0, 0}, {1, 1, 1, 1, 1}};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase0_area_vertices
-      = {MakeAreaBoundsVertices(0.0, 1.0), MakeAreaBoundsVertices(0.5, 1.5),
-         MakeAreaBoundsVertices(2.0, 2.0)};
-  const std::vector<std::vector<hcpwa::Vec<8>>> phase1_area_vertices
-      = {MakeAreaBoundsVertices(0.25, 0.75), MakeAreaBoundsVertices(0.75, 1.25)};
+  const std::size_t n157 = group_cell_vertices(
+      hcpwa::CalcPrism(tri, {0, 4}), hcpwa::CalcPrism(tri, {4, 6}), {0, 4, 6});
+  const std::size_t n468 = group_cell_vertices(
+      hcpwa::CalcPrism(tri, {3, 7}), hcpwa::CalcPrism(tri, {5, 7}), {3, 5, 7});
 
-  hcpwa::CommonRefinementResult result
-      = hcpwa::compute_common_refinement_area_vertices(
-          phase0_layer, phase0_layer, phase0_layer, phase0_layer, phase0_layer,
-          phase1_layer, phase1_layer, phase1_layer, phase1_layer, phase1_layer,
-          phase0_area_prism_indices, phase1_area_prism_indices,
-          phase0_area_vertices, phase1_area_vertices, /*N=*/10.0,
-          /*verbose=*/false);
+  ASSERT_EQ(result.intersection_points_phase1.size(), 1U);
+  EXPECT_EQ(result.intersection_points_phase1[0].size(), n157 * n468 * 3)
+      << "phase-1 area is not the full product of its two group cells and the "
+         "2D simplex";
 
-  ASSERT_EQ(result.areas.size(), 4U);
-  std::vector<std::pair<size_t, size_t>> pairs;
-  pairs.reserve(result.areas.size());
-  for (const auto& area : result.areas) {
-    ASSERT_FALSE(area.vertices.empty());
-    pairs.emplace_back(area.phase0_area_id, area.phase1_area_id);
-  }
-
-  EXPECT_TRUE(std::is_sorted(pairs.begin(), pairs.end()));
-  EXPECT_EQ(std::unique(pairs.begin(), pairs.end()), pairs.end());
-  EXPECT_EQ(
-      pairs,
-      (std::vector<std::pair<size_t, size_t>>{{0, 0}, {0, 1}, {1, 0}, {1, 1}}));
+  GTEST_COUT << " group cell sizes: 136=" << n136 << " 247=" << n247
+             << " 157=" << n157 << " 468=" << n468 << ", phase-0 area has "
+             << result.intersection_points_phase0[0].size() << " vertices\n";
 }

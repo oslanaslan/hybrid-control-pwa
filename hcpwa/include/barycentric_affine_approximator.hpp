@@ -15,6 +15,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "barycentric_geometry_types.hpp"
+#include "courier_border_solver.hpp"
 #include "interval_building.hpp"
 #include "util/value_function_utils.hpp"
 
@@ -28,31 +30,6 @@ namespace barycentric_affine_approximator {
 // zero-based because Eigen vectors and the rest of the C++ code are zero-based.
 extern const std::vector<int> kInIds;
 extern const std::vector<int> kOutIds;
-
-constexpr int kPhases = 2;
-constexpr int kSpaceDim = 8;
-constexpr int kSubsystemCount = 5;
-
-// Geometry and LP tolerances are intentionally separated by name in comments in
-// the source, but kept numerically equal for this first implementation.
-constexpr double kEps = 1e-5;
-constexpr double kGeomEps = 1e-8;
-
-// Tolerance for the optional end-to-end residual check. It has to sit above the
-// HiGHS feasibility tolerance, otherwise the check would fire on solutions that
-// the solver legitimately reports as optimal.
-constexpr double kResidualValidationTol = 1e-4;
-
-using ValueFunction = hcpwa::util::ValueFunction;
-
-// Direction of the approximation. It enters every LP row and the objective only
-// through the sign s of step 2.1:
-//   s = +1 (Upper): the residual must satisfy max_omega F <= 0;
-//   s = -1 (Lower): the residual must satisfy min_omega F >= 0.
-// The name deliberately mirrors global_affine_approximator::ApproximationMode.
-// The two namespaces are independent and no translation unit includes both
-// headers, so the repeated name cannot create an ambiguity.
-enum class ApproximationMode { Upper, Lower };
 
 struct SystemParams {
   double N;
@@ -78,17 +55,6 @@ struct SystemParams {
   double f3max;
   double f5max;
   double f8max;
-};
-
-// Sparse vector used for formula-level LP coefficients such as phi_{j,nu} and
-// a_{j,nu}. The representation is deliberately simple: the barycentric LP is
-// difficult to debug, so we keep sparse operations explicit and local.
-struct SparseVec {
-  std::vector<int> cols;
-  std::vector<double> vals;
-
-  void add(int col, double value, double eps = kEps);
-  double dot(const std::vector<double>& x) const;
 };
 
 // Sparse representation of Psi_j in the formula grad V = Psi_j x. There are
@@ -127,58 +93,6 @@ struct ResidualRhsTerm {
   double g = 0.0;       // g_i(nu)
 };
 
-// Barycentric coordinates on one 2D simplex:
-//   alpha(z) = H z + h,
-// where z is the projected 2D point P_s n and alpha has three components.
-struct TriangleBasis {
-  std::array<int, 3> vertex_ids{};
-  Eigen::Matrix<double, 3, 2> H = Eigen::Matrix<double, 3, 2>::Zero();
-  Eigen::Vector3d h = Eigen::Vector3d::Zero();
-};
-
-// One projection layer s. It owns the unique 2D vertices for that layer and the
-// barycentric map for every triangle in that layer.
-struct ProjectionLayer {
-  std::array<int, 2> axes{};
-  std::vector<hcpwa::TriangleWithUniqueVertices> triangles;
-  std::vector<Eigen::Vector2d> unique_vertices;
-  std::vector<TriangleBasis> bases;
-};
-
-// Geometry for one phase. A full 8D region stores both its vertices and the
-// five triangle ids used to select the local barycentric charts.
-struct PhaseGeometry {
-  std::array<ProjectionLayer, kSubsystemCount> layers;
-  std::vector<std::vector<Eigen::VectorXd>> region_vertices;
-  std::vector<std::array<int, kSubsystemCount>> region_triangle_ids;
-};
-
-// One nonempty cell of the common refinement Omega_0^(j0) cap Omega_1^(j1).
-// The upper border LP needs only the vertex set, but the lower one selects one
-// family member per cell (step 2.2, section 6.1), so cell membership must
-// survive the vertex deduplication.
-struct RefinementCell {
-  int phase0_area_id = 0;
-  int phase1_area_id = 0;
-  // Indices into common_refinement_vertices_.
-  std::vector<int> vertex_ids;
-};
-
-// Layout of the LP variable vector:
-//   Y = [x; y_0; y_1; ...; y_{M-1}],
-// where x contains all unique 2D barycentric vertex values and y_j is the
-// 8-vector auxiliary for |Psi_j x| in full region j.
-struct BarycentricVarLayout {
-  std::array<int, kSubsystemCount> eta_s{};
-  std::array<int, kSubsystemCount> offset_s{};
-  int num_x = 0;
-  int num_regions = 0;
-  int num_cols = 0;
-
-  int idxX(int subsystem, int vertex_id) const;
-  int idxY(int region, int dim) const;
-};
-
 class BarycentricAffineApproximator {
  private:
   double t_max_;
@@ -199,8 +113,6 @@ class BarycentricAffineApproximator {
 
   ValueFunction value_function_;
   std::vector<Eigen::VectorXd> cube_angle_vertices_;
-  std::vector<Eigen::VectorXd> common_refinement_vertices_;
-  std::vector<RefinementCell> refinement_cells_;
 
   std::array<PhaseGeometry, kPhases> phase_geometries_;
   std::array<BarycentricVarLayout, kPhases> layouts_;
@@ -208,11 +120,6 @@ class BarycentricAffineApproximator {
   // w = integral over Omega of phi^(phase)(n) dn, the objective of the border LP
   // (step 2.2, section 7). Computed in closed form from triangle areas.
   std::array<Eigen::VectorXd, kPhases> node_weights_;
-
-  // phi^(phase)(g) for every g in common_refinement_vertices_. The border LP is
-  // solved once per (level, theta, phase), so locating every g and rebuilding
-  // its phi row on each call would repeat the same work thousands of times.
-  std::array<std::vector<SparseVec>, kPhases> phi_at_refinement_;
 
   std::vector<std::vector<Eigen::MatrixXd>> A_j_matrs_;
   std::vector<std::vector<Eigen::VectorXd>> f_j_vecs_;
@@ -233,6 +140,12 @@ class BarycentricAffineApproximator {
   std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
   interval_building::ThetaTIndexLists theta_t_index_lists_;
+
+  // Border conditions at switching instants. Held by value: CourierBorderSolver
+  // keeps its prepared tables behind a shared_ptr precisely so that this class
+  // stays implicitly movable.
+  CourierBorderOptions courier_options_;
+  CourierBorderSolver courier_solver_;
 
   SparseVec buildPhiRow(int phase, int region, const Eigen::VectorXd& point,
                         double tolerance = kEps) const;
@@ -276,6 +189,12 @@ class BarycentricAffineApproximator {
   // Enables the per-step residual recomputation of validateStepResiduals().
   // Intended for debugging runs on a reduced geometry.
   void setValidate(bool validate) { validate_ = validate; }
+
+  // Must be called before run(); prepare() reads these when it builds the
+  // courier tables.
+  void setCourierOptions(const CourierBorderOptions& options) {
+    courier_options_ = options;
+  }
 
   double getBetaParamForAxis(int i, int j) const;
   std::pair<double, double> getFMinMaxForAxis(int i) const;

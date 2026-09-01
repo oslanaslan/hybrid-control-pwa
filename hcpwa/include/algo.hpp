@@ -71,23 +71,6 @@ struct PhaseIntersectionResult {
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
 };
 
-// One nonempty cell in the common refinement of the phase-0 and phase-1 area
-// partitions. The area ids index the already computed per-phase area arrays,
-// while the prism index arrays keep the phase-specific tuple order explicit:
-//   phase 0: [31, 36, 24, 27, 58]
-//   phase 1: [51, 57, 84, 86, 23]
-struct CommonRefinementArea {
-  size_t phase0_area_id = 0;
-  size_t phase1_area_id = 0;
-  std::array<size_t, 5> phase0_prism_indices{};
-  std::array<size_t, 5> phase1_prism_indices{};
-  std::vector<hcpwa::Vec<8>> vertices;
-};
-
-struct CommonRefinementResult {
-  std::vector<CommonRefinementArea> areas;
-};
-
 // Structure to hold computation results for areas vertices
 struct TriangleAreasVerticesResult {
   // Phase 0
@@ -106,7 +89,6 @@ struct TriangleAreasVerticesResult {
   std::vector<hcpwa::TriangleWithUniqueVertices> triangles23;
   std::vector<std::vector<hcpwa::Vec<8>>> intersection_points_phase1;
   std::vector<std::vector<size_t>> intersection_prism_indices_phase1;
-  CommonRefinementResult common_refinement;
 };
 
 struct PolygonAreasVerticesResult {
@@ -186,23 +168,6 @@ PhaseIntersectionResult compute_intersection_points(
     const std::vector<hcpwa::PolygonResolution>& polygons23,
     hcpwa::Float N,
     bool verbose = false);
-
-CommonRefinementResult compute_common_refinement_area_vertices(
-    const std::vector<hcpwa::LineSet<8>>& prisms31,
-    const std::vector<hcpwa::LineSet<8>>& prisms36,
-    const std::vector<hcpwa::LineSet<8>>& prisms24,
-    const std::vector<hcpwa::LineSet<8>>& prisms27,
-    const std::vector<hcpwa::LineSet<8>>& prisms58,
-    const std::vector<hcpwa::LineSet<8>>& prisms51,
-    const std::vector<hcpwa::LineSet<8>>& prisms57,
-    const std::vector<hcpwa::LineSet<8>>& prisms84,
-    const std::vector<hcpwa::LineSet<8>>& prisms86,
-    const std::vector<hcpwa::LineSet<8>>& prisms23,
-    const std::vector<std::vector<size_t>>& phase0_area_prism_indices,
-    const std::vector<std::vector<size_t>>& phase1_area_prism_indices,
-    const std::vector<std::vector<hcpwa::Vec<8>>>& phase0_area_vertices,
-    const std::vector<std::vector<hcpwa::Vec<8>>>& phase1_area_vertices,
-    hcpwa::Float N, bool verbose = false);
 
 // Compute areas vertices - pure C++ computation logic
 TriangleAreasVerticesResult compute_triangle_areas_vertices(double N, double F, double v, double w,

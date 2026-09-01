@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -191,7 +192,8 @@ int ReducedLpRowLayout::rowTieBreak(int k, bool positive) const {
   return tie_break_offset + 2 * k + (positive ? 0 : 1);
 }
 
-void clampBlockRho(ReducedLpInput& input, double tolerance) {
+RhoClampStats clampBlockRho(ReducedLpInput& input, double tolerance) {
+  RhoClampStats stats;
   for (std::size_t b = 0; b < input.blocks.size(); ++b) {
     for (std::size_t j = 0; j < input.blocks[b].regions.size(); ++j) {
       for (BlockVertexData& vertex : input.blocks[b].regions[j].vertices) {
@@ -203,11 +205,22 @@ void clampBlockRho(ReducedLpInput& input, double tolerance) {
           }
           if (vertex.rho(p) < 0.0) {
             vertex.rho(p) = 0.0;
+            ++stats.negatives_clamped;
+          } else if (vertex.rho(p) > 0.0
+                     && vertex.rho(p) <= kSmallMatrixValue) {
+            // rho(nu) is affine with coefficients of order 1e-1 to 1e1, so a
+            // value this small means nu is on the line where the two flow
+            // bounds meet and the true radius is zero. Snap it: leaving it in
+            // would let HiGHS drop the entry silently, which is the one thing
+            // the assembler refuses to allow.
+            vertex.rho(p) = 0.0;
+            ++stats.tiny_snapped;
           }
         }
       }
     }
   }
+  return stats;
 }
 
 ReducedLpColLayout makeReducedLpColLayout(const ReducedLpInput& input) {
@@ -363,9 +376,11 @@ ReducedLpMatrices assembleReducedLp(const ReducedLpInput& input) {
           if (rho > 0.0 && rho <= kSmallMatrixValue) {
             // HiGHS would drop this entry, which removes a term that only ever
             // tightens (L). The result would silently stop being a bound.
-            throw std::runtime_error(
-                "assembleReducedLp: rho = " + std::to_string(rho)
-                + " is at or below the HiGHS small_matrix_value");
+            std::ostringstream message;
+            message << "assembleReducedLp: rho = " << rho
+                    << " is at or below the HiGHS small_matrix_value; call "
+                       "clampBlockRho first";
+            throw std::runtime_error(message.str());
           }
           left_row.add(out.cols.idxYBlock(b, j, p), rho, 0.0);
         }

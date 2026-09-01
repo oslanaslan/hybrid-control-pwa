@@ -167,10 +167,22 @@ struct ReducedLpMatrices {
   std::vector<double> col_upper;
 };
 
-// Clamps small negative disturbance radii to zero and throws on larger ones.
-// Call this once on the input: the row builder, the RHS update and the residual
-// check all read rho exactly as given, so the clamp must happen in one place.
-void clampBlockRho(ReducedLpInput& input, double tolerance = kEps);
+struct RhoClampStats {
+  // Small negatives, which are numerical noise around an exact zero radius.
+  int negatives_clamped = 0;
+  // Magnitudes at or below kSmallMatrixValue, snapped to exactly zero. rho is
+  // affine in nu with coefficients of order 1e-1 to 1e1, so a magnitude that
+  // small means the vertex sits on the branch line where the two bounds
+  // coincide and the radius is exactly zero. Snapping is what keeps HiGHS from
+  // dropping the entry silently instead.
+  int tiny_snapped = 0;
+};
+
+// Normalises the disturbance radii. Call this once on the input: the row
+// builder, the RHS update and the residual check all read rho exactly as
+// given, so this has to happen in one place. Throws on a radius that is
+// negative beyond numerical noise.
+RhoClampStats clampBlockRho(ReducedLpInput& input, double tolerance = kEps);
 
 ReducedLpColLayout makeReducedLpColLayout(const ReducedLpInput& input);
 ReducedLpRowLayout makeReducedLpRowLayout(const ReducedLpInput& input);

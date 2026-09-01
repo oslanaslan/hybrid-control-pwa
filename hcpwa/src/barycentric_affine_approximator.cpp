@@ -66,39 +66,6 @@ Eigen::VectorXd toEigen8(const hcpwa::Vec<8>& v) {
 // share one source of truth for this table.
 using barycentric_affine_approximator::projectionAxesForPhase;
 
-// Appends a sparse row to the CSR arrays. This mirrors csrAppendRow() but avoids
-// building dense rows with eta_i + 8M columns, which can be large for the
-// barycentric basis.
-void appendSparseRow(std::vector<int>& starts, std::vector<int>& cols,
-                     std::vector<double>& values,
-                     const barycentric_affine_approximator::SparseVec& row,
-                     double eps = barycentric_affine_approximator::kEps) {
-  int nnz = static_cast<int>(values.size());
-  for (std::size_t i = 0; i < row.cols.size(); ++i) {
-    if (std::abs(row.vals[i]) <= eps) {
-      continue;
-    }
-    cols.push_back(row.cols[i]);
-    values.push_back(row.vals[i]);
-    ++nnz;
-  }
-  starts.push_back(nnz);
-}
-
-// Computes beta = Psi_j^T * w as a sparse vector over the x block. This is the
-// implementation of beta_{j,nu} = Psi_j^T (A_j nu + f_j + c_{j,nu}).
-barycentric_affine_approximator::SparseVec psiTransposeTimes(
-    const barycentric_affine_approximator::SparsePsi& psi,
-    const Eigen::VectorXd& w) {
-  barycentric_affine_approximator::SparseVec result;
-  for (int r = 0; r < barycentric_affine_approximator::kSpaceDim; ++r) {
-    for (std::size_t k = 0; k < psi.rows[r].cols.size(); ++k) {
-      result.add(psi.rows[r].cols[k], psi.rows[r].vals[k] * w(r));
-    }
-  }
-  return result;
-}
-
 }  // namespace
 
 namespace barycentric_affine_approximator {
@@ -146,16 +113,6 @@ int BarycentricVarLayout::idxX(int subsystem, int vertex_id) const {
     throw std::invalid_argument("BarycentricVarLayout::idxX: bad vertex id");
   }
   return offset_s[subsystem] + vertex_id;
-}
-
-int BarycentricVarLayout::idxY(int region, int dim) const {
-  if (region < 0 || region >= num_regions) {
-    throw std::invalid_argument("BarycentricVarLayout::idxY: bad region");
-  }
-  if (dim < 0 || dim >= kSpaceDim) {
-    throw std::invalid_argument("BarycentricVarLayout::idxY: bad dimension");
-  }
-  return num_x + region * kSpaceDim + dim;
 }
 
 BarycentricAffineApproximator::BarycentricAffineApproximator(
@@ -327,7 +284,8 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
           system_params_.b36, system_params_.b24, system_params_.b27,
           system_params_.f2min, system_params_.f3min, system_params_.f5min,
           system_params_.f8min, system_params_.f2max, system_params_.f3max,
-          system_params_.f5max, system_params_.f8max, true);
+          system_params_.f5max, system_params_.f8max, true,
+          geometry_options_);
 
   auto build_projection_layer =
       [](const std::vector<hcpwa::TriangleWithUniqueVertices>& triangles,
@@ -478,14 +436,12 @@ void BarycentricAffineApproximator::getIntersectionPoints() {
     }
 
     BarycentricVarLayout layout;
-    layout.num_regions = static_cast<int>(geometry.region_vertices.size());
     for (int s = 0; s < kSubsystemCount; ++s) {
       layout.offset_s[s] = layout.num_x;
       layout.eta_s[s]
           = static_cast<int>(geometry.layers[s].unique_vertices.size());
       layout.num_x += layout.eta_s[s];
     }
-    layout.num_cols = layout.num_x + kSpaceDim * layout.num_regions;
     layouts_[phase] = layout;
   }
 
@@ -771,370 +727,366 @@ Eigen::VectorXd BarycentricAffineApproximator::areaCentroidCoords(
   return centroid;
 }
 
-std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
-BarycentricAffineApproximator::getAMatrFVecGVecAndGScalJ(
-    int j, int phase) const {
-  // Copy of the global affine CTM branch-resolution formulas. The barycentric
-  // LP changes the value-function representation, not the CTM dynamics.
-  Eigen::VectorXd n = areaCentroidCoords(j, phase);
-
-  Eigen::MatrixXd a_matr;
-  Eigen::VectorXd b_vec;
-  Eigen::VectorXd g_vec;
-  double g_scal = 0.0;
-
-  if (phase == 0) {
-    auto [f31_matr_row, f31_vec_row] = getFIJMinResolution(3 - 1, 1 - 1, n);
-    auto [f36_matr_row, f36_vec_row] = getFIJMinResolution(3 - 1, 6 - 1, n);
-    auto [f24_matr_row, f24_vec_row] = getFIJMinResolution(2 - 1, 4 - 1, n);
-    auto [f27_matr_row, f27_vec_row] = getFIJMinResolution(2 - 1, 7 - 1, n);
-
-    a_matr.resize(kSpaceDim, kSpaceDim);
-    a_matr.row(0) = f31_matr_row;
-    a_matr.row(1) = -f24_matr_row - f27_matr_row;
-    a_matr.row(2) = -f31_matr_row - f36_matr_row;
-    a_matr.row(3) = f24_matr_row;
-    a_matr.row(4) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(5) = f36_matr_row;
-    a_matr.row(6) = f27_matr_row;
-    a_matr.row(7) = Eigen::RowVectorXd::Zero(kSpaceDim);
-
-    b_vec.resize(kSpaceDim);
-    b_vec(0) = f31_vec_row(0);
-    b_vec(1) = -f24_vec_row(0) - f27_vec_row(0);
-    b_vec(2) = -f31_vec_row(0) - f36_vec_row(0);
-    b_vec(3) = f24_vec_row(0);
-    b_vec(4) = 0.0;
-    b_vec(5) = f36_vec_row(0);
-    b_vec(6) = f27_vec_row(0);
-    b_vec(7) = 0.0;
-
-    g_vec = (f31_matr_row + f36_matr_row + f24_matr_row + f27_matr_row)
-                .transpose();
-    g_scal = f31_vec_row(0) + f36_vec_row(0) + f24_vec_row(0)
-             + f27_vec_row(0);
-  } else if (phase == 1) {
-    auto [f51_matr_row, f51_vec_row] = getFIJMinResolution(5 - 1, 1 - 1, n);
-    auto [f57_matr_row, f57_vec_row] = getFIJMinResolution(5 - 1, 7 - 1, n);
-    auto [f84_matr_row, f84_vec_row] = getFIJMinResolution(8 - 1, 4 - 1, n);
-    auto [f86_matr_row, f86_vec_row] = getFIJMinResolution(8 - 1, 6 - 1, n);
-
-    a_matr.resize(kSpaceDim, kSpaceDim);
-    a_matr.row(0) = f51_matr_row;
-    a_matr.row(1) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(2) = Eigen::RowVectorXd::Zero(kSpaceDim);
-    a_matr.row(3) = f84_matr_row;
-    a_matr.row(4) = -f51_matr_row - f57_matr_row;
-    a_matr.row(5) = f86_matr_row;
-    a_matr.row(6) = f57_matr_row;
-    a_matr.row(7) = -f84_matr_row - f86_matr_row;
-
-    b_vec.resize(kSpaceDim);
-    b_vec(0) = f51_vec_row(0);
-    b_vec(1) = 0.0;
-    b_vec(2) = 0.0;
-    b_vec(3) = f84_vec_row(0);
-    b_vec(4) = -f51_vec_row(0) - f57_vec_row(0);
-    b_vec(5) = f86_vec_row(0);
-    b_vec(6) = f57_vec_row(0);
-    b_vec(7) = -f84_vec_row(0) - f86_vec_row(0);
-
-    g_vec = (f51_matr_row + f57_matr_row + f84_matr_row + f86_matr_row)
-                .transpose();
-    g_scal = f51_vec_row(0) + f57_vec_row(0) + f84_vec_row(0)
-             + f86_vec_row(0);
-  } else {
-    throw std::invalid_argument("getAMatrFVecGVecAndGScalJ: invalid phase");
+CtmRegionData BarycentricAffineApproximator::ctmDataForCells(
+    int phase, const std::vector<int>& cells, const Eigen::VectorXd& n) const {
+  // One assembly rule for the whole CTM drift: a flow f_ij leaves cell i and
+  // enters cell j, so row j gains it and row i loses it, and g is the sum of
+  // all four flows. Written out per phase this is exactly the a_matr / b_vec /
+  // g_vec block of the paper.
+  if (n.size() != kSpaceDim) {
+    throw std::invalid_argument("ctmDataForCells: n must be 8-dimensional");
+  }
+  const int size = static_cast<int>(cells.size());
+  std::array<int, kSpaceDim> position{};
+  position.fill(-1);
+  for (int k = 0; k < size; ++k) {
+    if (cells[static_cast<std::size_t>(k)] < 0
+        || cells[static_cast<std::size_t>(k)] >= kSpaceDim) {
+      throw std::invalid_argument("ctmDataForCells: cell id out of range");
+    }
+    position[static_cast<std::size_t>(cells[static_cast<std::size_t>(k)])] = k;
   }
 
-  hcpwa::util::assertShape(a_matr, kSpaceDim, kSpaceDim);
-  hcpwa::util::assertShape(b_vec, kSpaceDim);
-  hcpwa::util::assertShape(g_vec, kSpaceDim);
-  hcpwa::util::assertScalar(g_scal);
-  return std::make_tuple(a_matr, b_vec, g_vec, g_scal);
+  CtmRegionData out;
+  out.a = Eigen::MatrixXd::Zero(size, size);
+  out.f = Eigen::VectorXd::Zero(size);
+  out.g_vec = Eigen::VectorXd::Zero(size);
+
+  for (const auto& flow : phaseFlows(phase)) {
+    const int from = flow[0];
+    const int to = flow[1];
+    const int from_at = position[static_cast<std::size_t>(from)];
+    const int to_at = position[static_cast<std::size_t>(to)];
+    if (from_at < 0 && to_at < 0) {
+      continue;
+    }
+    if (from_at < 0 || to_at < 0) {
+      // A flow whose two cells fall in different blocks would make the drift
+      // depend on coordinates the block does not own, and the residual would
+      // stop being separable. The block split is chosen so this cannot happen.
+      throw std::runtime_error(std::format(
+          "ctmDataForCells: flow {}->{} straddles the given cell set", from,
+          to));
+    }
+
+    const auto [row, scalar] = getFIJMinResolution(from, to, n);
+    // The resolved row is supported on the flow's own two cells, both of which
+    // are in `cells`, so nothing is dropped by the restriction below.
+    for (int c = 0; c < kSpaceDim; ++c) {
+      if (position[static_cast<std::size_t>(c)] < 0
+          && std::abs(row(c)) > 0.0) {
+        throw std::runtime_error(
+            "ctmDataForCells: resolved flow touches a cell outside the set");
+      }
+    }
+
+    Eigen::VectorXd restricted = Eigen::VectorXd::Zero(size);
+    for (int k = 0; k < size; ++k) {
+      restricted(k) = row(cells[static_cast<std::size_t>(k)]);
+    }
+    out.a.row(to_at) += restricted.transpose();
+    out.a.row(from_at) -= restricted.transpose();
+    out.f(to_at) += scalar(0);
+    out.f(from_at) -= scalar(0);
+    out.g_vec += restricted;
+    out.g_scal += scalar(0);
+  }
+
+  hcpwa::util::assertScalar(out.g_scal);
+  return out;
 }
 
-std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd, Eigen::VectorXd>
-BarycentricAffineApproximator::getQQForArea(int j, int phase) const {
-  // Builds affine center/radius maps for the disturbance box:
-  //   c_j(n) = Qc_j n + qc_j
-  //   rho_j(n) = Qr_j n + qr_j.
-  // The branch resolution is intentionally copied from the global affine code.
-  Eigen::VectorXd n0 = areaCentroidCoords(j, phase);
-  Eigen::MatrixXd Q_upper = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Eigen::VectorXd q_upper = Eigen::VectorXd::Zero(kSpaceDim);
-  Eigen::MatrixXd Q_lower = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
-  Eigen::VectorXd q_lower = Eigen::VectorXd::Zero(kSpaceDim);
+BoxRegionData BarycentricAffineApproximator::boxDataForCells(
+    const std::vector<int>& cells, const Eigen::VectorXd& n0) const {
+  // Affine center/radius maps of the disturbance box:
+  //   c(n) = qc_diag .* n + qc_off,  rho(n) = qr_diag .* n + qr_off.
+  // Every entry depends on its own cell only, which is why these are diagonal
+  // and why the restriction to a block is exact. Branch resolution is copied
+  // from the global affine code.
+  if (n0.size() != kSpaceDim) {
+    throw std::invalid_argument("boxDataForCells: n0 must be 8-dimensional");
+  }
+  const int size = static_cast<int>(cells.size());
+  Eigen::VectorXd upper_diag = Eigen::VectorXd::Zero(size);
+  Eigen::VectorXd upper_off = Eigen::VectorXd::Zero(size);
+  Eigen::VectorXd lower_diag = Eigen::VectorXd::Zero(size);
+  Eigen::VectorXd lower_off = Eigen::VectorXd::Zero(size);
 
   const double N = system_params_.N;
   const double w = system_params_.w;
   const double v = system_params_.v;
   const double F = system_params_.F;
 
-  for (int i : kInIds) {
-    const double ni = n0(i);
-    auto [f_min, f_max] = getFMinMaxForAxis(i);
-    if (f_min < w * (N - ni)) {
-      q_lower(i) = f_min;
-    } else {
-      Q_lower(i, i) = -w;
-      q_lower(i) = w * N;
+  for (int k = 0; k < size; ++k) {
+    const int i = cells[static_cast<std::size_t>(k)];
+    const bool is_in
+        = std::find(kInIds.begin(), kInIds.end(), i) != kInIds.end();
+    const bool is_out
+        = std::find(kOutIds.begin(), kOutIds.end(), i) != kOutIds.end();
+    if (is_in == is_out) {
+      throw std::runtime_error(
+          "boxDataForCells: every cell must be exactly one of in/out");
     }
-    if (f_max < w * (N - ni)) {
-      q_upper(i) = f_max;
+    const double ni = n0(i);
+    if (!std::isfinite(ni)) {
+      throw std::runtime_error(
+          "boxDataForCells: n0 is not finite at a cell of the set");
+    }
+
+    if (is_in) {
+      const auto [f_min, f_max] = getFMinMaxForAxis(i);
+      if (f_min < w * (N - ni)) {
+        lower_off(k) = f_min;
+      } else {
+        lower_diag(k) = -w;
+        lower_off(k) = w * N;
+      }
+      if (f_max < w * (N - ni)) {
+        upper_off(k) = f_max;
+      } else {
+        upper_diag(k) = -w;
+        upper_off(k) = w * N;
+      }
     } else {
-      Q_upper(i, i) = -w;
-      q_upper(i) = w * N;
+      // Outgoing cells carry no uncertainty: upper stays at zero, so the
+      // radius is half the magnitude of the lower branch.
+      if (F < v * ni) {
+        lower_off(k) = -F;
+      } else {
+        lower_diag(k) = -v;
+      }
     }
   }
 
-  for (int i : kOutIds) {
-    const double ni = n0(i);
-    if (F < v * ni) {
-      q_lower(i) = -F;
-    } else {
-      Q_lower(i, i) = -v;
-    }
-  }
-
-  Eigen::MatrixXd Q_c = (Q_upper + Q_lower) / 2.0;
-  Eigen::MatrixXd Q_r = (Q_upper - Q_lower) / 2.0;
-  Eigen::VectorXd q_c = (q_upper + q_lower) / 2.0;
-  Eigen::VectorXd q_r = (q_upper - q_lower) / 2.0;
-  return std::make_tuple(Q_c, q_c, Q_r, q_r);
+  BoxRegionData out;
+  out.qc_diag = (upper_diag + lower_diag) / 2.0;
+  out.qc_off = (upper_off + lower_off) / 2.0;
+  out.qr_diag = (upper_diag - lower_diag) / 2.0;
+  out.qr_off = (upper_off - lower_off) / 2.0;
+  return out;
 }
 
-std::tuple<std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-           std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-           std::vector<Eigen::MatrixXd>, std::vector<Eigen::VectorXd>,
-           std::vector<Eigen::VectorXd>, std::vector<double>>
-BarycentricAffineApproximator::precomputeSystemMatrices(int phase) {
-  // Static per-region CTM data. These matrices are independent of time and of
-  // x_next, so they are computed once before the reusable LP is built.
-  const int n_areas
-      = static_cast<int>(phase_geometries_[phase].region_vertices.size());
-  std::vector<Eigen::MatrixXd> A_j_matrs;
-  std::vector<Eigen::VectorXd> f_j_vecs;
-  std::vector<Eigen::MatrixXd> Q_c_j_matrs;
-  std::vector<Eigen::VectorXd> q_c_j_vecs;
-  std::vector<Eigen::MatrixXd> Q_r_j_matrs;
-  std::vector<Eigen::VectorXd> q_r_j_vecs;
-  std::vector<Eigen::VectorXd> g_j_vecs;
-  std::vector<double> g_j_scals;
+std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::VectorXd, double>
+BarycentricAffineApproximator::getAMatrFVecGVecAndGScalJ(
+    int j, int phase) const {
+  std::vector<int> cells(kSpaceDim);
+  std::iota(cells.begin(), cells.end(), 0);
+  const CtmRegionData data
+      = ctmDataForCells(phase, cells, areaCentroidCoords(j, phase));
 
-  A_j_matrs.reserve(n_areas);
-  f_j_vecs.reserve(n_areas);
-  Q_c_j_matrs.reserve(n_areas);
-  q_c_j_vecs.reserve(n_areas);
-  Q_r_j_matrs.reserve(n_areas);
-  q_r_j_vecs.reserve(n_areas);
-  g_j_vecs.reserve(n_areas);
-  g_j_scals.reserve(n_areas);
-
-  for (int j = 0; j < n_areas; ++j) {
-    auto [A_j, f_j, g_j, g0_j] = getAMatrFVecGVecAndGScalJ(j, phase);
-    auto [Qc_j, qc_j, Qr_j, qr_j] = getQQForArea(j, phase);
-    A_j_matrs.push_back(std::move(A_j));
-    f_j_vecs.push_back(std::move(f_j));
-    Q_c_j_matrs.push_back(std::move(Qc_j));
-    q_c_j_vecs.push_back(std::move(qc_j));
-    Q_r_j_matrs.push_back(std::move(Qr_j));
-    q_r_j_vecs.push_back(std::move(qr_j));
-    g_j_vecs.push_back(std::move(g_j));
-    g_j_scals.push_back(g0_j);
-  }
-
-  return std::make_tuple(A_j_matrs, f_j_vecs, Q_c_j_matrs, q_c_j_vecs,
-                         Q_r_j_matrs, q_r_j_vecs, g_j_vecs, g_j_scals);
+  hcpwa::util::assertShape(data.a, kSpaceDim, kSpaceDim);
+  hcpwa::util::assertShape(data.f, kSpaceDim);
+  hcpwa::util::assertShape(data.g_vec, kSpaceDim);
+  return std::make_tuple(data.a, data.f, data.g_vec, data.g_scal);
 }
 
-std::tuple<std::vector<int>, std::vector<int>, std::vector<double>,
-           std::vector<double>, std::vector<double>, Eigen::RowVectorXd>
-BarycentricAffineApproximator::prepareLpMatrices(int phase) {
-  // Builds the static LP matrix for one phase. Only residual row upper bounds
-  // change with x_next; all left-hand side coefficients and objective costs are
-  // fixed after this function returns.
+std::tuple<Eigen::MatrixXd, Eigen::VectorXd, Eigen::MatrixXd, Eigen::VectorXd>
+BarycentricAffineApproximator::getQQForArea(int j, int phase) const {
+  std::vector<int> cells(kSpaceDim);
+  std::iota(cells.begin(), cells.end(), 0);
+  const BoxRegionData data
+      = boxDataForCells(cells, areaCentroidCoords(j, phase));
+
+  Eigen::MatrixXd Q_c = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
+  Eigen::MatrixXd Q_r = Eigen::MatrixXd::Zero(kSpaceDim, kSpaceDim);
+  Q_c.diagonal() = data.qc_diag;
+  Q_r.diagonal() = data.qr_diag;
+  return std::make_tuple(Q_c, data.qc_off, Q_r, data.qr_off);
+}
+
+Eigen::VectorXd BarycentricAffineApproximator::blockCentroidCoords(
+    int phase, int block, int block_region) const {
+  if (phase < 0 || phase >= kPhases) {
+    throw std::invalid_argument("blockCentroidCoords: invalid phase");
+  }
+  if (block < 0 || block >= kBlockCount) {
+    throw std::invalid_argument("blockCentroidCoords: invalid block");
+  }
+  const BlockGeometry& geometry
+      = phase_geometries_[phase].blocks[static_cast<std::size_t>(block)];
+  if (block_region < 0 || block_region >= geometry.numRegions()) {
+    throw std::invalid_argument("blockCentroidCoords: invalid block region");
+  }
+  const auto& vertices
+      = geometry.vertices[static_cast<std::size_t>(block_region)];
+  if (vertices.empty()) {
+    throw std::runtime_error("blockCentroidCoords: block region has no "
+                             "vertices");
+  }
+  Eigen::VectorXd centroid = Eigen::VectorXd::Zero(geometry.coord_count);
+  for (const auto& vertex : vertices) {
+    centroid += vertex;
+  }
+  centroid /= static_cast<double>(vertices.size());
+  return centroid;
+}
+
+BlockSystemMatrices BarycentricAffineApproximator::getBlockSystemMatrices(
+    int phase, int block, int block_region) const {
+  const BlockGeometry& geometry
+      = phase_geometries_[phase].blocks[static_cast<std::size_t>(block)];
+  const Eigen::VectorXd centroid
+      = blockCentroidCoords(phase, block, block_region);
+
+  // Scatter the block centroid into an 8-vector and leave every other
+  // coordinate NaN. Each flow of this block reads only its own two cells, both
+  // of which are in the block, so the padding is never read -- and if it ever
+  // were, all three branch comparisons would be false and getFIJMinResolution
+  // would throw rather than return a wrong branch.
+  Eigen::VectorXd padded = Eigen::VectorXd::Constant(
+      kSpaceDim, std::numeric_limits<double>::quiet_NaN());
+  std::vector<int> cells;
+  cells.reserve(geometry.coord_count);
+  for (int c = 0; c < geometry.coord_count; ++c) {
+    const int cell = geometry.coords[static_cast<std::size_t>(c)];
+    padded(cell) = centroid(c);
+    cells.push_back(cell);
+  }
+
+  BlockSystemMatrices out;
+  out.ctm = ctmDataForCells(phase, cells, padded);
+  out.box = boxDataForCells(cells, padded);
+  return out;
+}
+
+std::vector<BlockSystemMatrices>
+BarycentricAffineApproximator::precomputeBlockSystemMatrices(int phase,
+                                                             int block) {
+  const BlockGeometry& geometry
+      = phase_geometries_[phase].blocks[static_cast<std::size_t>(block)];
+  std::vector<BlockSystemMatrices> out;
+  out.reserve(static_cast<std::size_t>(geometry.numRegions()));
+  for (int j = 0; j < geometry.numRegions(); ++j) {
+    out.push_back(getBlockSystemMatrices(phase, block, j));
+  }
+  return out;
+}
+
+void BarycentricAffineApproximator::buildReducedLpInput(int phase) {
+  // Builds the block description the reduced LP is assembled from. Everything
+  // here is per block-region, never per product region: the 8D region is the
+  // direct product of the three blocks and the residual is additively separable
+  // over them, so a row of block b is shared by all R / R_b product rows that
+  // contain it.
   const auto& geometry = phase_geometries_[phase];
   const auto& layout = layouts_[phase];
-  const int n_cols = layout.num_cols;
 
-  std::vector<int> starts = {0};
-  std::vector<int> col_index;
-  std::vector<double> value;
-  std::vector<double> row_lower;
-  std::vector<double> row_upper;
-  Eigen::RowVectorXd c_vec = Eigen::RowVectorXd::Zero(n_cols);
+  block_reduction::ReducedLpInput input;
+  input.num_x = layout.num_x;
+  input.t_delta = t_delta_;
+  input.sign_s = signS();
+  input.weights = objective_weights_;
+  input.tie_break_eps = tie_break_eps_;
+  input.blocks.resize(kBlockCount);
 
-  // s = +1 for the upper bound, -1 for the lower one. After the corrections of
-  // step 2.1 this is the only thing separating the two directions.
-  const double s = signS();
-
-  rhs_terms_[phase].clear();
-  psi_by_region_[phase].clear();
-  psi_by_region_[phase].resize(layout.num_regions);
-
-  const auto& A_j_matrs = A_j_matrs_[phase];
-  const auto& f_j_vecs = f_j_vecs_[phase];
-  const auto& Q_c_j_matrs = Q_c_j_matrs_[phase];
-  const auto& q_c_j_vecs = q_c_j_vecs_[phase];
-  const auto& Q_r_j_matrs = Q_r_j_matrs_[phase];
-  const auto& q_r_j_vecs = q_r_j_vecs_[phase];
-  const auto& g_j_vecs = g_j_vecs_[phase];
-  const auto& g_j_scals = g_j_scals_[phase];
-
-  for (int j = 0; j < layout.num_regions; ++j) {
-    const auto& triangle_ids = geometry.region_triangle_ids[j];
-
-    // Build Psi_j once per full 8D region. For every local barycentric value
-    // v_l, derivative d alpha_l / d n_axis contributes H(l,local_axis).
-    SparsePsi psi_j;
-    for (int s = 0; s < kSubsystemCount; ++s) {
-      const int triangle_id = triangle_ids[s];
-      const auto& layer = geometry.layers[s];
-      if (triangle_id < 0
-          || triangle_id >= static_cast<int>(layer.bases.size())) {
-        throw std::runtime_error("prepareLpMatrices: triangle id out of range");
-      }
-      const auto& basis = layer.bases[triangle_id];
-      for (int local_vertex = 0; local_vertex < 3; ++local_vertex) {
-        const int x_col = layout.idxX(s, basis.vertex_ids[local_vertex]);
-        for (int local_axis = 0; local_axis < 2; ++local_axis) {
-          const int state_axis = layer.axes[local_axis];
-          psi_j.rows[state_axis].add(x_col,
-                                     basis.H(local_vertex, local_axis));
-        }
-      }
+  for (int b = 0; b < kBlockCount; ++b) {
+    const BlockGeometry& block = geometry.blocks[static_cast<std::size_t>(b)];
+    const auto& system = block_system_[phase][static_cast<std::size_t>(b)];
+    if (static_cast<int>(system.size()) != block.numRegions()) {
+      throw std::runtime_error(
+          "buildReducedLpInput: block system matrices are missing; call "
+          "precomputeMatrices() first");
     }
-    psi_by_region_[phase][j] = psi_j;
 
-    for (const Eigen::VectorXd& nu : geometry.region_vertices[j]) {
-      // phi_{j,nu} is the value selector: V(t,nu) = phi_{j,nu}^T x. Each
-      // projection contributes the three barycentric coordinates of P_s nu.
-      SparseVec phi = buildPhiRow(phase, j, nu, kEps);
+    block_reduction::ReducedLpBlock out_block;
+    out_block.coord_count = block.coord_count;
+    out_block.regions.resize(static_cast<std::size_t>(block.numRegions()));
 
-      const Eigen::VectorXd d = A_j_matrs[j] * nu + f_j_vecs[j];
-      const Eigen::VectorXd c = Q_c_j_matrs[j] * nu + q_c_j_vecs[j];
-      Eigen::VectorXd rho = Q_r_j_matrs[j] * nu + q_r_j_vecs[j];
+    for (int j = 0; j < block.numRegions(); ++j) {
+      block_reduction::BlockRegionData& region
+          = out_block.regions[static_cast<std::size_t>(j)];
 
-      // rho is the radius of the uncertainty box. Small negative values can
-      // only be numerical noise; larger negatives mean the region did not
-      // refine uncertainty branches correctly.
-      for (int r = 0; r < kSpaceDim; ++r) {
-        if (rho(r) < -kEps) {
+      // Psi_{b,j}: one row per block coordinate. Each of the block's planes
+      // contributes d alpha_l / d n_axis to the row of that axis, and the axis
+      // sits at local_axis inside this block's coordinate list.
+      region.psi_rows.resize(static_cast<std::size_t>(block.coord_count));
+      for (int l = 0; l < block.layer_count; ++l) {
+        const int s = block.layer_ids[static_cast<std::size_t>(l)];
+        const ProjectionLayer& layer = geometry.layers[static_cast<std::size_t>(
+            s)];
+        const int triangle_id
+            = block.triangle_ids[static_cast<std::size_t>(j)][
+                static_cast<std::size_t>(l)];
+        if (triangle_id < 0
+            || triangle_id >= static_cast<int>(layer.bases.size())) {
           throw std::runtime_error(
-              "prepareLpMatrices: negative uncertainty radius.");
+              "buildReducedLpInput: triangle id out of range");
         }
-        if (rho(r) < 0.0) {
-          rho(r) = 0.0;
+        const TriangleBasis& basis
+            = layer.bases[static_cast<std::size_t>(triangle_id)];
+        for (int local_vertex = 0; local_vertex < 3; ++local_vertex) {
+          const int x_col = layout.idxX(s, basis.vertex_ids[
+              static_cast<std::size_t>(local_vertex)]);
+          for (int local_axis = 0; local_axis < 2; ++local_axis) {
+            const int row = block.local_axis[static_cast<std::size_t>(l)][
+                static_cast<std::size_t>(local_axis)];
+            region.psi_rows[static_cast<std::size_t>(row)].add(
+                x_col, basis.H(local_vertex, local_axis),
+                block_reduction::kAssembleEps);
+          }
         }
       }
 
-      // m = A_j nu + f_j + c_j(nu): the drift with the disturbance-box centre
-      // folded in. Used by the Right row, whose RHS is recomputed per step.
-      const Eigen::VectorXd m = d + c;
-      const double g_nu = g_j_vecs[j].dot(nu) + g_j_scals[j];
-
-      // ---- Row (L): the segment endpoint with the unknown value z. ----
-      // F^L = a^T z + b + s rho^T |Psi_j z|, with
-      //   a = Psi_j^T m - phi / dt,  b = phi^T x_next / dt + g(nu).
-      // The modulus is taken at the unknown, so it is lifted to y_j >= |Psi_j z|
-      // and the row reads  s a^T z + rho^T y_j <= -s b.  Note that rho enters
-      // with a plus for BOTH directions; only a and the RHS flip (step 2.1, 4).
-      SparseVec a = psiTransposeTimes(psi_j, m);
-      for (std::size_t k = 0; k < phi.cols.size(); ++k) {
-        a.add(phi.cols[k], -phi.vals[k] / t_delta_);
-      }
-
-      SparseVec left_row;
-      for (std::size_t k = 0; k < a.cols.size(); ++k) {
-        left_row.add(a.cols[k], s * a.vals[k]);
-      }
-      for (int r = 0; r < kSpaceDim; ++r) {
-        left_row.add(layout.idxY(j, r), rho(r));
-      }
-      appendSparseRow(starts, col_index, value, left_row, kEps);
-      row_lower.push_back(-std::numeric_limits<double>::infinity());
-      // Fixed part of -s b; the -s phi^T x_next / dt part is added per step.
-      row_upper.push_back(-s * g_nu);
-      {
-        ResidualRhsTerm term;
-        term.row_id = static_cast<int>(row_upper.size() - 1);
-        term.kind = RhsKind::Left;
-        term.phi = phi;
-        rhs_terms_[phase].push_back(std::move(term));
-      }
-
-      // ---- Row (R): the segment endpoint with the known value x_next. ----
-      // F^R = phi^T (x_next - z) / dt + beta, with
-      //   beta = q^T m + s rho^T |q| + g(nu),  q = Psi_j x_next.
-      // Multiplying by dt > 0 gives the row  -s phi^T z <= -s (phi^T x_next +
-      // dt beta).  There is no y block here: the modulus is taken at the known
-      // x_next and therefore evaluates to a number (step 2.1, 3.1).
-      SparseVec right_row;
-      for (std::size_t k = 0; k < phi.cols.size(); ++k) {
-        right_row.add(phi.cols[k], -s * phi.vals[k]);
-      }
-      appendSparseRow(starts, col_index, value, right_row, kEps);
-      row_lower.push_back(-std::numeric_limits<double>::infinity());
-      // Entirely dynamic: recomputed from scratch in updateHighsRhsUpperBounds.
-      row_upper.push_back(0.0);
-      {
-        ResidualRhsTerm term;
-        term.row_id = static_cast<int>(row_upper.size() - 1);
-        term.kind = RhsKind::Right;
-        term.phi = phi;
-        term.region = j;
-        term.m = m;
-        term.rho = rho;
-        term.g = g_nu;
-        rhs_terms_[phase].push_back(std::move(term));
-      }
-
-      // Objective: l1 norm of the residuals at the endpoint with the known
-      // value. That residual is linear in z (no modulus, no y), so its l1 norm
-      // is an exact LP objective; the residual at the other endpoint is concave
-      // in z and cannot be minimized by an LP (step 2.1, section 5).
-      //   delta^R     = -s F^R = (s/dt) phi^T z + const,
-      //   sum delta^R = (s/dt) (sum phi)^T z + const,   minimized.
-      for (std::size_t k = 0; k < phi.cols.size(); ++k) {
-        c_vec(phi.cols[k]) += (s / t_delta_) * phi.vals[k];
+      const BlockSystemMatrices& data = system[static_cast<std::size_t>(j)];
+      region.vertices.reserve(
+          block.vertices[static_cast<std::size_t>(j)].size());
+      for (const Eigen::VectorXd& nu :
+           block.vertices[static_cast<std::size_t>(j)]) {
+        block_reduction::BlockVertexData vertex;
+        vertex.phi = barycentric_affine_approximator::buildPhiRowBlock(
+            geometry, layout, b, j, nu, kEps);
+        // m = A_b nu + f_b + c_b(nu): the drift with the disturbance box centre
+        // folded in. Q_c and Q_r are diagonal, hence the elementwise products.
+        vertex.m = data.ctm.a * nu + data.ctm.f
+                   + data.box.qc_diag.cwiseProduct(nu) + data.box.qc_off;
+        vertex.rho = data.box.qr_diag.cwiseProduct(nu) + data.box.qr_off;
+        vertex.g = data.ctm.g_vec.dot(nu) + data.ctm.g_scal;
+        region.vertices.push_back(std::move(vertex));
       }
     }
-
-    // Absolute value linearization for this region:
-    //   Psi_j x - y_j <= 0
-    //  -Psi_j x - y_j <= 0
-    // y_j >= 0 is implemented as a column lower bound in initializeHighs().
-    for (int r = 0; r < kSpaceDim; ++r) {
-      SparseVec row = psi_j.rows[r];
-      row.add(layout.idxY(j, r), -1.0);
-      appendSparseRow(starts, col_index, value, row, kEps);
-      row_lower.push_back(-std::numeric_limits<double>::infinity());
-      row_upper.push_back(0.0);
-    }
-    for (int r = 0; r < kSpaceDim; ++r) {
-      SparseVec row;
-      for (std::size_t k = 0; k < psi_j.rows[r].cols.size(); ++k) {
-        row.add(psi_j.rows[r].cols[k], -psi_j.rows[r].vals[k]);
-      }
-      row.add(layout.idxY(j, r), -1.0);
-      appendSparseRow(starts, col_index, value, row, kEps);
-      row_lower.push_back(-std::numeric_limits<double>::infinity());
-      row_upper.push_back(0.0);
-    }
+    input.blocks[static_cast<std::size_t>(b)] = std::move(out_block);
   }
 
-  const int n_rows = static_cast<int>(row_upper.size());
-  const int nnz = static_cast<int>(value.size());
-  logger_->info(
-      "prepareLpMatrices: phase={}, variables(num_cols)={}, num_x={}, "
-      "num_y={}, regions={}, rows={}, nnz={}, rhs_terms={}",
-      phase, n_cols, layout.num_x, kSpaceDim * layout.num_regions,
-      layout.num_regions, n_rows, nnz, rhs_terms_[phase].size());
+  // Radii are normalised here, once: the row builder, the RHS update and the
+  // residual check all read rho exactly as given.
+  const block_reduction::RhoClampStats rho_stats
+      = block_reduction::clampBlockRho(input, kEps);
+  if (rho_stats.negatives_clamped > 0 || rho_stats.tiny_snapped > 0) {
+    logger_->info(
+        "buildReducedLpInput: phase={}, clamped {} negative and snapped {} "
+        "sub-1e-9 uncertainty radii to zero (vertices sitting on a flow branch "
+        "line)",
+        phase, rho_stats.negatives_clamped, rho_stats.tiny_snapped);
+  }
 
-  return std::make_tuple(std::move(starts), std::move(col_index),
-                         std::move(value), std::move(row_lower),
-                         std::move(row_upper), std::move(c_vec));
+  reduced_inputs_[phase] = std::move(input);
+  reduced_cols_[phase]
+      = block_reduction::makeReducedLpColLayout(reduced_inputs_[phase]);
+  reduced_rows_[phase]
+      = block_reduction::makeReducedLpRowLayout(reduced_inputs_[phase]);
+}
+
+block_reduction::ReducedLpMatrices
+BarycentricAffineApproximator::prepareLpMatrices(int phase) const {
+  block_reduction::ReducedLpMatrices matrices
+      = block_reduction::assembleReducedLp(reduced_inputs_[phase]);
+
+  double product_rows = 1.0;
+  for (const auto& block : reduced_inputs_[phase].blocks) {
+    double pairs = 0.0;
+    for (const auto& region : block.regions) {
+      pairs += static_cast<double>(region.vertices.size());
+    }
+    product_rows *= pairs;
+  }
+  logger_->info(
+      "prepareLpMatrices: phase={}, rows={}, cols={}, nnz={}, block regions="
+      "{}/{}/{}, product form would have needed {:.3e} residual rows",
+      phase, matrices.rows.num_rows, matrices.cols.num_cols,
+      matrices.value.size(), reduced_cols_[phase].num_regions[0],
+      reduced_cols_[phase].num_regions[1], reduced_cols_[phase].num_regions[2],
+      2.0 * product_rows);
+  return matrices;
 }
 
 std::vector<double> BarycentricAffineApproximator::getBorderConditions(
@@ -1241,11 +1193,10 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
 
 std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
 BarycentricAffineApproximator::initializeHighs(int phase) {
-  auto [starts, col_index, value, row_lower, row_upper, c_vec]
-      = prepareLpMatrices(phase);
+  const block_reduction::ReducedLpMatrices matrices = prepareLpMatrices(phase);
   const auto& layout = layouts_[phase];
-  const int m = static_cast<int>(row_upper.size());
-  const int n = static_cast<int>(c_vec.size());
+  const int m = matrices.rows.num_rows;
+  const int n = matrices.cols.num_cols;
 
   std::unique_ptr<Highs> highs = std::make_unique<Highs>();
   highs->setOptionValue("solver", "simplex");
@@ -1258,47 +1209,42 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
   highs->setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
   highs->setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
   highs->setOptionValue("optimality_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
+  // Same constant the assembler checks emitted rho entries against: HiGHS drops
+  // matrix entries at or below it, and a dropped rho would weaken row (L).
+  highs->setOptionValue("small_matrix_value",
+                        block_reduction::kSmallMatrixValue);
   highs->setOptionValue("log_to_console", highs_verbose_);
 
   // The objective is the l1 norm of the residuals measured at the endpoint with
   // the known value, and it is minimized in both directions: the sign s is
-  // already baked into c_vec by prepareLpMatrices (step 2.1, section 5).
+  // already baked into the cost by the assembler (step 2.1, section 5).
   highs->changeObjectiveSense(ObjSense::kMinimize);
 
-  const double inf = highs->getInfinity();
-  std::vector<double> col_lower(n, -inf);
-  std::vector<double> col_upper(n, inf);
-
-  // y_j represents |Psi_j x| and must be nonnegative. The two abs rows enforce
-  // y_j >= +/-Psi_j x; this lower bound supplies y_j >= 0 without extra rows.
-  for (int j = 0; j < layout.num_regions; ++j) {
-    for (int r = 0; r < kSpaceDim; ++r) {
-      col_lower[layout.idxY(j, r)] = 0.0;
-    }
-  }
-
-  // Gauge fixing removes the additive nullspace between the five projected
-  // layers. Do not fix layer 0; layers 1..4 get their first vertex pinned to 0.
+  // y >= 0 and u >= 0 come from the assembler. Gauge fixing is ours: it removes
+  // the additive nullspace between the five projected layers. Do not fix layer
+  // 0; layers 1..4 get their first vertex pinned to 0.
+  std::vector<double> col_lower = matrices.col_lower;
+  std::vector<double> col_upper = matrices.col_upper;
   for (int s = 1; s < kSubsystemCount; ++s) {
     if (layout.eta_s[s] == 0) {
       throw std::runtime_error("initializeHighs: empty projection layer");
     }
     const int col = layout.idxX(s, 0);
-    col_lower[col] = 0.0;
-    col_upper[col] = 0.0;
+    col_lower[static_cast<std::size_t>(col)] = 0.0;
+    col_upper[static_cast<std::size_t>(col)] = 0.0;
   }
 
   HighsStatus st = highs->addCols(
-      n, c_vec.data(), col_lower.data(), col_upper.data(), /*num_nz=*/0,
-      /*start=*/nullptr, /*index=*/nullptr, /*value=*/nullptr);
+      n, matrices.cost.data(), col_lower.data(), col_upper.data(),
+      /*num_nz=*/0, /*start=*/nullptr, /*index=*/nullptr, /*value=*/nullptr);
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("initializeHighs: highs.addCols failed.");
   }
 
-  st = highs->addRows(m, row_lower.data(), row_upper.data(),
-                      static_cast<int>(value.size()), starts.data(),
-                      col_index.data(), value.data());
+  st = highs->addRows(m, matrices.row_lower.data(), matrices.row_upper.data(),
+                      static_cast<int>(matrices.value.size()),
+                      matrices.starts.data(), matrices.col_index.data(),
+                      matrices.value.data());
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("initializeHighs: highs.addRows failed.");
   }
@@ -1314,60 +1260,29 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
     throw std::runtime_error("initializeHighs: highs.setSolution failed.");
   }
 
-  return std::make_tuple(std::move(highs), std::move(row_lower),
-                         std::move(row_upper));
+  return std::make_tuple(std::move(highs), matrices.row_lower,
+                         matrices.row_upper);
 }
 
 void BarycentricAffineApproximator::updateHighsRhsUpperBounds(
     int phase, int solver_index, const std::vector<double>& x_next) {
-  // Only the residual row RHS depends on x_next. Absolute-value rows and
-  // gauge-fixed column bounds remain static.
-  //   Left  row:  upper = -s g(nu)  -  s phi^T x_next / dt   (base + increment)
-  //   Right row:  upper = -s (phi^T x_next + dt beta),
-  //               beta  = q^T m + s rho^T |q| + g(nu),  q = Psi_j x_next.
-  // The modulus lives here and only here: q is built from the known x_next, so
-  // it is a vector of numbers and the LP stays linear (step 2.1, section 3.1).
+  // Only the residual row upper bounds depend on x_next; absolute-value rows,
+  // the two coupling rows and the column bounds are static. The formulas live
+  // next to the row builder in block_reduction_lp.cpp precisely because the two
+  // have to agree on the row scale.
   const auto& layout = layouts_[phase];
   if (x_next.size() != static_cast<std::size_t>(layout.num_x)) {
     throw std::invalid_argument("updateHighsRhsUpperBounds: x_next size must be "
                                 + std::to_string(layout.num_x));
   }
 
-  const double s = signS();
   const auto& row_lower = row_lowers_[solver_index];
-  const auto& base_upper = row_uppers_[solver_index];
+  const std::vector<double> new_row_upper
+      = block_reduction::updateReducedLpRowUpper(
+          reduced_inputs_[phase], reduced_rows_[phase],
+          row_uppers_[solver_index], x_next);
+
   auto& highs_solver = highs_solvers_[solver_index];
-  std::vector<double> new_row_upper = base_upper;
-
-  // q_j = Psi_j x_next, computed once per region and shared by all Right rows
-  // of that region.
-  const auto& psi_by_region = psi_by_region_[phase];
-  std::vector<Eigen::VectorXd> q(psi_by_region.size());
-  for (std::size_t j = 0; j < psi_by_region.size(); ++j) {
-    q[j] = Eigen::VectorXd::Zero(kSpaceDim);
-    for (int r = 0; r < kSpaceDim; ++r) {
-      q[j](r) = psi_by_region[j].rows[r].dot(x_next);
-    }
-  }
-
-  for (const auto& term : rhs_terms_[phase]) {
-    const double phi_x = term.phi.dot(x_next);
-    double upper = 0.0;
-    if (term.kind == RhsKind::Left) {
-      upper = base_upper[term.row_id] - s * phi_x / t_delta_;
-    } else {
-      if (term.region < 0 || term.region >= static_cast<int>(q.size())) {
-        throw std::runtime_error(
-            "updateHighsRhsUpperBounds: Right term has an invalid region id");
-      }
-      const Eigen::VectorXd& qj = q[term.region];
-      const double beta
-          = qj.dot(term.m) + s * term.rho.dot(qj.cwiseAbs()) + term.g;
-      upper = -s * (phi_x + t_delta_ * beta);
-    }
-    new_row_upper[term.row_id] = (std::abs(upper) <= kEps) ? 0.0 : upper;
-  }
-
   std::vector<int> row_ids(new_row_upper.size());
   std::iota(row_ids.begin(), row_ids.end(), 0);
   HighsStatus st = highs_solver->changeRowsBounds(
@@ -1409,62 +1324,24 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
 void BarycentricAffineApproximator::validateStepResiduals(
     int phase, const std::vector<double>& x_next,
     const std::vector<double>& z) const {
-  // Recomputes both residuals of the segment straight from the formulas and
-  // checks their sign. This is the end-to-end check of the assembly: if the row
-  // signs, the RHS updates or the psi/phi tables are wrong, it fires here rather
-  // than silently producing a function that is not a bound.
+  // The exact worst residual over the whole product of regions and vertices.
+  // The residual is additively separable over the three blocks, so the maximum
+  // over the product is the sum of the per-block maxima -- this is the true
+  // global worst case, not a sample of it, and it costs O(sum_b R_b).
   //
-  //   F^L = phi^T d + (Psi_j z)^T m       + s rho^T |Psi_j z|       + g(nu)
-  //   F^R = phi^T d + (Psi_j x_next)^T m  + s rho^T |Psi_j x_next|  + g(nu)
+  //   F^L = phi^T d + (Psi_j z)^T m      + s rho^T |Psi_j z|      + g(nu)
+  //   F^R = phi^T d + (Psi_j x_next)^T m + s rho^T |Psi_j x_next| + g(nu)
   //   d   = (x_next - z) / dt
-  // Both must satisfy s * F <= 0, i.e. F >= 0 for the lower bound (s = -1) and
+  // Both must satisfy s * F <= 0: F >= 0 for the lower bound (s = -1) and
   // F <= 0 for the upper one (s = +1).
-  const double s = signS();
-  const auto& geometry = phase_geometries_[phase];
-  const auto& psi_by_region = psi_by_region_[phase];
-  const auto& A_j_matrs = A_j_matrs_[phase];
-  const auto& f_j_vecs = f_j_vecs_[phase];
-  const auto& Q_c_j_matrs = Q_c_j_matrs_[phase];
-  const auto& q_c_j_vecs = q_c_j_vecs_[phase];
-  const auto& Q_r_j_matrs = Q_r_j_matrs_[phase];
-  const auto& q_r_j_vecs = q_r_j_vecs_[phase];
-  const auto& g_j_vecs = g_j_vecs_[phase];
-  const auto& g_j_scals = g_j_scals_[phase];
-
-  const int n_regions = static_cast<int>(geometry.region_vertices.size());
-  double worst = 0.0;
-  for (int j = 0; j < n_regions; ++j) {
-    Eigen::VectorXd q_left = Eigen::VectorXd::Zero(kSpaceDim);
-    Eigen::VectorXd q_right = Eigen::VectorXd::Zero(kSpaceDim);
-    for (int r = 0; r < kSpaceDim; ++r) {
-      q_left(r) = psi_by_region[j].rows[r].dot(z);
-      q_right(r) = psi_by_region[j].rows[r].dot(x_next);
-    }
-
-    for (const Eigen::VectorXd& nu : geometry.region_vertices[j]) {
-      const SparseVec phi = buildPhiRow(phase, j, nu, kEps);
-      const Eigen::VectorXd m = A_j_matrs[j] * nu + f_j_vecs[j]
-                                + Q_c_j_matrs[j] * nu + q_c_j_vecs[j];
-      Eigen::VectorXd rho = Q_r_j_matrs[j] * nu + q_r_j_vecs[j];
-      rho = rho.cwiseMax(0.0);
-      const double g_nu = g_j_vecs[j].dot(nu) + g_j_scals[j];
-
-      const double slope = (phi.dot(x_next) - phi.dot(z)) / t_delta_;
-      const double f_left = slope + q_left.dot(m)
-                            + s * rho.dot(q_left.cwiseAbs()) + g_nu;
-      const double f_right = slope + q_right.dot(m)
-                             + s * rho.dot(q_right.cwiseAbs()) + g_nu;
-
-      // s * F <= 0 is the requirement; anything above tolerance is a violation.
-      worst = std::max(worst, s * f_left);
-      worst = std::max(worst, s * f_right);
-    }
-  }
-
-  if (worst > kResidualValidationTol) {
+  const block_reduction::WorstResidual worst
+      = block_reduction::worstReducedResidual(reduced_inputs_[phase], x_next,
+                                              z);
+  if (worst.worst() > kResidualValidationTol) {
     throw std::runtime_error(
         "validateStepResiduals: residual has the wrong sign, worst s*F = "
-        + std::to_string(worst));
+        + std::to_string(worst.worst()) + " (left " + std::to_string(worst.left)
+        + ", right " + std::to_string(worst.right) + ")");
   }
 }
 
@@ -1472,62 +1349,166 @@ std::vector<double> BarycentricAffineApproximator::solveMainLpStep(
     int phase, int solver_index, const std::vector<double>& x_next) {
   updateHighsRhsUpperBounds(phase, solver_index, x_next);
   std::vector<double> z = solveLp(phase, solver_index);
-  if (validate_) {
-    validateStepResiduals(phase, x_next, z);
-  }
+  validateStepResiduals(phase, x_next, z);
   return z;
+}
+
+void BarycentricAffineApproximator::validateBlockDecomposition(
+    int phase) const {
+  const auto& blocks = phase_geometries_[phase].blocks;
+  std::vector<int> all_cells(kSpaceDim);
+  std::iota(all_cells.begin(), all_cells.end(), 0);
+
+  int rounds = 0;
+  for (int b = 0; b < kBlockCount; ++b) {
+    rounds = std::max(rounds, blocks[static_cast<std::size_t>(b)].numRegions());
+  }
+
+  // Block b's rows are built from block b's flows, which read only block b's
+  // coordinates, so for a fixed j_b they do not depend on the other two blocks.
+  // Walking the three index lists together therefore covers every block-region
+  // in max_b M_b full evaluations instead of the product.
+  for (int round = 0; round < rounds; ++round) {
+    std::array<int, kBlockCount> js{};
+    Eigen::VectorXd centroid = Eigen::VectorXd::Zero(kSpaceDim);
+    for (int b = 0; b < kBlockCount; ++b) {
+      const BlockGeometry& geometry = blocks[static_cast<std::size_t>(b)];
+      js[static_cast<std::size_t>(b)]
+          = std::min(round, geometry.numRegions() - 1);
+      const Eigen::VectorXd block_centroid = blockCentroidCoords(
+          phase, b, js[static_cast<std::size_t>(b)]);
+      for (int c = 0; c < geometry.coord_count; ++c) {
+        centroid(geometry.coords[static_cast<std::size_t>(c)])
+            = block_centroid(c);
+      }
+    }
+
+    const CtmRegionData full_ctm = ctmDataForCells(phase, all_cells, centroid);
+    const BoxRegionData full_box = boxDataForCells(all_cells, centroid);
+
+    double g_scal_sum = 0.0;
+    for (int b = 0; b < kBlockCount; ++b) {
+      const BlockGeometry& geometry = blocks[static_cast<std::size_t>(b)];
+      const BlockSystemMatrices data = getBlockSystemMatrices(
+          phase, b, js[static_cast<std::size_t>(b)]);
+      g_scal_sum += data.ctm.g_scal;
+
+      for (int r = 0; r < geometry.coord_count; ++r) {
+        const int gr = geometry.coords[static_cast<std::size_t>(r)];
+        for (int c = 0; c < kSpaceDim; ++c) {
+          int local = -1;
+          for (int k = 0; k < geometry.coord_count; ++k) {
+            if (geometry.coords[static_cast<std::size_t>(k)] == c) {
+              local = k;
+              break;
+            }
+          }
+          const double expected
+              = local < 0 ? 0.0 : data.ctm.a(r, local);
+          if (full_ctm.a(gr, c) != expected) {
+            throw std::runtime_error(std::format(
+                "validateBlockDecomposition: phase {} block {} disagrees on "
+                "A({},{})", phase, b, gr, c));
+          }
+        }
+        if (full_ctm.f(gr) != data.ctm.f(r)
+            || full_ctm.g_vec(gr) != data.ctm.g_vec(r)
+            || full_box.qc_diag(gr) != data.box.qc_diag(r)
+            || full_box.qc_off(gr) != data.box.qc_off(r)
+            || full_box.qr_diag(gr) != data.box.qr_diag(r)
+            || full_box.qr_off(gr) != data.box.qr_off(r)) {
+          throw std::runtime_error(std::format(
+              "validateBlockDecomposition: phase {} block {} disagrees at "
+              "cell {}", phase, b, gr));
+        }
+      }
+    }
+    if (g_scal_sum != full_ctm.g_scal) {
+      throw std::runtime_error(std::format(
+          "validateBlockDecomposition: phase {} block g scalars sum to {} "
+          "instead of {}", phase, g_scal_sum, full_ctm.g_scal));
+    }
+  }
+
+  // While the 8D product is still materialised, check that concatenating the
+  // three block centroids reproduces it. The two are not bit-identical -- the
+  // 8D mean sums every value |V_b'| |V_b''| times -- so this is the one place a
+  // tolerance is used.
+  // Skipped when the 8D product was not materialised: the region list is then
+  // present but every entry is empty.
+  const auto& region_vertices = phase_geometries_[phase].region_vertices;
+  if (!region_vertices.empty() && !region_vertices.front().empty()) {
+    const int sample = std::min<int>(8, static_cast<int>(
+        region_vertices.size()));
+    const int m_b = blocks[1].numRegions();
+    const int m_c = blocks[2].numRegions();
+    for (int j = 0; j < sample; ++j) {
+      const int jc = j % m_c;
+      const int jb = (j / m_c) % m_b;
+      const int ja = j / (m_c * m_b);
+      const std::array<int, kBlockCount> js = {ja, jb, jc};
+      Eigen::VectorXd concatenated = Eigen::VectorXd::Zero(kSpaceDim);
+      for (int b = 0; b < kBlockCount; ++b) {
+        const BlockGeometry& geometry = blocks[static_cast<std::size_t>(b)];
+        const Eigen::VectorXd block_centroid = blockCentroidCoords(
+            phase, b, js[static_cast<std::size_t>(b)]);
+        for (int c = 0; c < geometry.coord_count; ++c) {
+          concatenated(geometry.coords[static_cast<std::size_t>(c)])
+              = block_centroid(c);
+        }
+      }
+      const Eigen::VectorXd expected = areaCentroidCoords(j, phase);
+      const double error = (concatenated - expected).cwiseAbs().maxCoeff();
+      if (error > 1e-9 * std::max(1.0, expected.cwiseAbs().maxCoeff())) {
+        throw std::runtime_error(std::format(
+            "validateBlockDecomposition: phase {} region {} centroid differs "
+            "by {} between the block and product paths", phase, j, error));
+      }
+    }
+  }
 }
 
 void BarycentricAffineApproximator::precomputeMatrices() {
   logger_->info("Starting barycentric precomputeMatrices");
   for (int phase = 0; phase < kPhases; ++phase) {
-    if (phase_geometries_[phase].region_vertices.empty()) {
-      throw std::runtime_error(
-          "precomputeMatrices: geometry not initialized. Call "
-          "getIntersectionPoints() first.");
+    for (const auto& block : phase_geometries_[phase].blocks) {
+      if (block.numRegions() == 0) {
+        throw std::runtime_error(
+            "precomputeMatrices: geometry not initialized. Call "
+            "getIntersectionPoints() first.");
+      }
     }
   }
-  A_j_matrs_.clear();
-  f_j_vecs_.clear();
-  Q_c_j_matrs_.clear();
-  q_c_j_vecs_.clear();
-  Q_r_j_matrs_.clear();
-  q_r_j_vecs_.clear();
-  g_j_vecs_.clear();
-  g_j_scals_.clear();
 
   for (int phase = 0; phase < kPhases; ++phase) {
-    auto [A_j, f_j, Qc_j, qc_j, Qr_j, qr_j, g_j, g0_j]
-        = precomputeSystemMatrices(phase);
-    const int n_regions = static_cast<int>(A_j.size());
-    std::size_t n_vertices = 0;
-    for (const auto& verts : phase_geometries_[phase].region_vertices) {
-      n_vertices += verts.size();
+    for (int block = 0; block < kBlockCount; ++block) {
+      block_system_[phase][static_cast<std::size_t>(block)]
+          = precomputeBlockSystemMatrices(phase, block);
     }
-    if (n_regions == 0) {
-      logger_->info(
-          "precomputeMatrices: phase={}, regions=0, vertices=0 (no system "
-          "matrices)",
-          phase);
-    } else {
-      logger_->info(
-          "precomputeMatrices: phase={}, regions={}, vertices={}, A_j={}x{}, "
-          "f_j={}, Q_c={}x{}, q_c={}, Q_r={}x{}, q_r={}, g_j={}, layout: "
-          "num_x={}, num_y={}, num_cols={}",
-          phase, n_regions, n_vertices, A_j[0].rows(), A_j[0].cols(),
-          f_j[0].size(), Qc_j[0].rows(), Qc_j[0].cols(), qc_j[0].size(),
-          Qr_j[0].rows(), Qr_j[0].cols(), qr_j[0].size(), g_j[0].size(),
-          layouts_[phase].num_x, kSpaceDim * layouts_[phase].num_regions,
-          layouts_[phase].num_cols);
+    validateBlockDecomposition(phase);
+    buildReducedLpInput(phase);
+
+    double product_regions = 1.0;
+    std::size_t block_pairs = 0;
+    double product_pairs = 1.0;
+    for (const auto& block : reduced_inputs_[phase].blocks) {
+      product_regions *= static_cast<double>(block.regions.size());
+      std::size_t pairs = 0;
+      for (const auto& region : block.regions) {
+        pairs += region.vertices.size();
+      }
+      block_pairs += pairs;
+      product_pairs *= static_cast<double>(pairs);
     }
-    A_j_matrs_.push_back(std::move(A_j));
-    f_j_vecs_.push_back(std::move(f_j));
-    Q_c_j_matrs_.push_back(std::move(Qc_j));
-    q_c_j_vecs_.push_back(std::move(qc_j));
-    Q_r_j_matrs_.push_back(std::move(Qr_j));
-    q_r_j_vecs_.push_back(std::move(qr_j));
-    g_j_vecs_.push_back(std::move(g_j));
-    g_j_scals_.push_back(std::move(g0_j));
+    logger_->info(
+        "precomputeMatrices: phase={}, block regions={}/{}/{} (product "
+        "{:.3e}), block (region, vertex) pairs={} (product {:.3e}), "
+        "num_x={}, num_cols={}",
+        phase, reduced_cols_[phase].num_regions[0],
+        reduced_cols_[phase].num_regions[1],
+        reduced_cols_[phase].num_regions[2], product_regions, block_pairs,
+        product_pairs, layouts_[phase].num_x,
+        reduced_cols_[phase].num_cols);
   }
   logger_->info("Finished barycentric precomputeMatrices");
 }
@@ -1555,8 +1536,8 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
   logger_->info(
       "Finished getIntersectionPoints. Got {} areas for phase 0 and {} areas "
       "for phase 1",
-      phase_geometries_[0].region_vertices.size(),
-      phase_geometries_[1].region_vertices.size());
+      phase_geometries_[0].region_triangle_ids.size(),
+      phase_geometries_[1].region_triangle_ids.size());
   courier_options_.highs_verbose = highs_verbose_;
   courier_solver_ = CourierBorderSolver(courier_options_);
   courier_solver_.prepare(phase_geometries_, layouts_, node_weights_,
@@ -1564,10 +1545,6 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
   logger_->info("Finished preparing the courier border solver");
 
   precomputeMatrices();
-  logger_->info(
-      "Finished precomputeMatrices. Precomputed {} system matrices for phase 0 "
-      "and {} system matrices for phase 1",
-      A_j_matrs_[0].size(), A_j_matrs_[1].size());
 
   logger_->info("Start initializing Highs solvers");
   highs_solvers_.clear();
@@ -1585,11 +1562,10 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
     solver_mutexes_.push_back(std::make_unique<std::mutex>());
   }
 
-  // Initialize solver instances once and then reuse them. This is intentionally
-  // serialized: prepareLpMatrices() also refreshes shared per-phase RHS metadata
-  // (rhs_terms_[phase]), so parallel initialization of several solvers for the
-  // same phase would race on that metadata. The runtime optimization that
-  // matters for the algorithm is still preserved: the expensive HiGHS models are
+  // Initialize solver instances once and then reuse them. prepareLpMatrices()
+  // is now a pure function of reduced_inputs_, which precomputeMatrices() filled
+  // single-threaded above, so this loop no longer races on shared state -- it is
+  // kept sequential only because it is cheap. The expensive HiGHS models are
   // built once and only row bounds are updated inside the backward loop.
   for (int phase = 0; phase < kPhases; ++phase) {
     for (int s = 0; s < solvers_per_phase; ++s) {

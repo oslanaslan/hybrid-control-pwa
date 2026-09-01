@@ -151,14 +151,12 @@ Fixture makeFixture() {
     }
 
     BarycentricVarLayout layout;
-    layout.num_regions = static_cast<int>(geom.region_vertices.size());
     for (int s = 0; s < kSubsystemCount; ++s) {
       layout.offset_s[static_cast<std::size_t>(s)] = layout.num_x;
       layout.eta_s[static_cast<std::size_t>(s)]
           = static_cast<int>(unique_vertices.size());
       layout.num_x += layout.eta_s[static_cast<std::size_t>(s)];
     }
-    layout.num_cols = layout.num_x + kSpaceDim * layout.num_regions;
     f.layouts[static_cast<std::size_t>(phase)] = layout;
     f.node_weights[static_cast<std::size_t>(phase)]
         = Eigen::VectorXd::Ones(layout.num_x);

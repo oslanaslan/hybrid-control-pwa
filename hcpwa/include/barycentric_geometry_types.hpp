@@ -137,6 +137,25 @@ inline std::array<std::array<int, 2>, kSubsystemCount> projectionAxesForPhase(
   throw std::invalid_argument("projectionAxesForPhase: invalid phase");
 }
 
+// The four CTM flows of a phase, as zero-based (from, to) cell pairs. Row `to`
+// of A gains the flow, row `from` loses it, and g is their sum; that single
+// rule reproduces the whole assembly of A, f, g and g0.
+//
+// Every flow reads only its own two cells and both of them lie in the same
+// coordinate block, which is what lets the CTM data be built one block at a
+// time.
+inline std::array<std::array<int, 2>, 4> phaseFlows(int phase) {
+  if (phase == 0) {
+    // f31, f36, f24, f27 in the paper's one-based cell numbering.
+    return {{{2, 0}, {2, 5}, {1, 3}, {1, 6}}};
+  }
+  if (phase == 1) {
+    // f51, f57, f84, f86.
+    return {{{4, 0}, {4, 6}, {7, 3}, {7, 5}}};
+  }
+  throw std::invalid_argument("phaseFlows: invalid phase");
+}
+
 // Recovers the coordinate blocks of a phase from projectionAxesForPhase alone:
 // two state coordinates belong to the same block exactly when a chain of
 // projection planes links them, so the blocks are the connected components of
@@ -190,19 +209,20 @@ inline std::array<std::vector<int>, kBlockCount> coordinateBlocksForPhase(
   return blocks;
 }
 
-// Layout of the LP variable vector:
-//   Y = [x; y_0; y_1; ...; y_{M-1}],
-// where x contains all unique 2D barycentric vertex values and y_j is the
-// 8-vector auxiliary for |Psi_j x| in full region j.
+// Layout of the x block of the LP variable vector: all unique 2D barycentric
+// vertex values, one contiguous run per projection layer.
+//
+// The auxiliary y block is no longer described here. It used to be one
+// 8-vector per product region; it is now one vector per block-region, and its
+// columns -- together with the epigraph and tie-break columns -- are laid out
+// by block_reduction::ReducedLpColLayout. Removing idxY and num_regions rather
+// than repurposing them makes every missed call site a compile error.
 struct BarycentricVarLayout {
   std::array<int, kSubsystemCount> eta_s{};
   std::array<int, kSubsystemCount> offset_s{};
   int num_x = 0;
-  int num_regions = 0;
-  int num_cols = 0;
 
   int idxX(int subsystem, int vertex_id) const;
-  int idxY(int region, int dim) const;
 };
 
 // The value selector phi_{j,nu}: V(nu) = phi^T x. Free functions rather than

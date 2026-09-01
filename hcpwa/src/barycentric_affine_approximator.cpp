@@ -1220,6 +1220,25 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
   if (solution.col_value.size() < static_cast<std::size_t>(num_x)) {
     throw std::runtime_error("solveLp: HiGHS solution is too short.");
   }
+
+  if (tie_break_eps_ > 0.0) {
+    // The two halves of the objective, reported apart: the l1 residual norm is
+    // what the method minimizes, and the eps * ||z||_1 term only picks one
+    // point out of an optimal face. If the second is not far smaller than the
+    // first, the regularization is no longer a tie-break.
+    double regularizer = 0.0;
+    const auto& cols = reduced_cols_[phase];
+    for (int k = 0; k < num_x; ++k) {
+      regularizer += tie_break_eps_
+                     * solution.col_value[static_cast<std::size_t>(
+                         cols.idxU(k))];
+    }
+    logger_->info(
+        "solveLp: phase={}, residual objective {:.6e}, tie-break term {:.6e}",
+        phase, highs_solver->getInfo().objective_function_value - regularizer,
+        regularizer);
+  }
+
   return std::vector<double>(solution.col_value.begin(),
                              solution.col_value.begin() + num_x);
 }

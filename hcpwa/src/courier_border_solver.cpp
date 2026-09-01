@@ -495,6 +495,113 @@ struct CourierBorderSolver::Impl {
     return acc;
   }
 
+  // Picks, for every target region, the candidate whose Phi_rho is largest at
+  // the region centroid. Any choice is sound -- a courier for one rho gives
+  // Vt <= Phi_rho <= max_rho Phi_rho -- so this is purely about tightness.
+  //
+  // Done region by region it costs M * n_cand * 5 point locations, which is 46
+  // seconds for two candidates on the N=100 arrangement and the single largest
+  // cost in a solve(). It factors the same way everything else here does: a
+  // source plane's two axes lie in two different target blocks, the region
+  // centroid is the concatenation of the block centroids, so the plane's
+  // contribution depends only on the pair of block cells. There are
+  // sum_s M_b0 M_b1 pairs -- 109 thousand against 1.6 million regions -- and
+  // what remains per region is an argmax over sums of five table lookups.
+  std::vector<int> chooseCandidates(
+      int tgt, int src, const TargetData& data,
+      std::span<const std::vector<double>> candidates) const {
+    const auto n_cand = static_cast<int>(candidates.size());
+    const PhaseGeometry& tgt_geom
+        = (*geometries)[static_cast<std::size_t>(tgt)];
+    const PhaseGeometry& src_geom
+        = (*geometries)[static_cast<std::size_t>(src)];
+    const BarycentricVarLayout& src_lay
+        = (*layouts)[static_cast<std::size_t>(src)];
+
+    std::array<std::vector<double>, kSubsystemCount> plane_value;
+    for (int s = 0; s < kSubsystemCount; ++s) {
+      const SourcePlaneSplit& split = data.split[static_cast<std::size_t>(s)];
+      const int b0 = split.block[0];
+      const int b1 = split.block[1];
+      const int m0 = data.block_regions[static_cast<std::size_t>(b0)];
+      const int m1 = data.block_regions[static_cast<std::size_t>(b1)];
+      const LayerIndex& idx
+          = layer_index[static_cast<std::size_t>(src)][static_cast<std::size_t>(
+              s)];
+      const ProjectionLayer& layer
+          = src_geom.layers[static_cast<std::size_t>(s)];
+
+      plane_value[static_cast<std::size_t>(s)].assign(
+          static_cast<std::size_t>(m0) * m1 * n_cand,
+          -std::numeric_limits<double>::infinity());
+      for (int j0 = 0; j0 < m0; ++j0) {
+        const double x = data.block_centroid[static_cast<std::size_t>(b0)][
+            static_cast<std::size_t>(j0)](split.local[0]);
+        for (int j1 = 0; j1 < m1; ++j1) {
+          const double y = data.block_centroid[static_cast<std::size_t>(b1)][
+              static_cast<std::size_t>(j1)](split.local[1]);
+          int tri = -1;
+          double alpha[3];
+          if (!idx.locate(x, y, &tri, alpha)) {
+            continue;
+          }
+          const TriangleBasis& basis
+              = layer.bases[static_cast<std::size_t>(tri)];
+          const std::size_t base
+              = (static_cast<std::size_t>(j0) * m1 + j1)
+                * static_cast<std::size_t>(n_cand);
+          for (int c = 0; c < n_cand; ++c) {
+            double acc = 0.0;
+            for (int k = 0; k < 3; ++k) {
+              acc += alpha[k]
+                     * candidates[static_cast<std::size_t>(c)][
+                         static_cast<std::size_t>(src_lay.idxX(
+                             s, basis.vertex_ids[static_cast<std::size_t>(k)]))];
+            }
+            plane_value[static_cast<std::size_t>(s)][
+                base + static_cast<std::size_t>(c)] = acc;
+          }
+        }
+      }
+    }
+
+    const int n_regions = numRegions(tgt);
+    std::vector<int> out(static_cast<std::size_t>(n_regions), 0);
+    std::vector<double> total(static_cast<std::size_t>(n_cand));
+    for (int j = 0; j < n_regions; ++j) {
+      const std::array<int, kBlockCount> js = decodeRegion(tgt, j);
+      std::fill(total.begin(), total.end(), 0.0);
+      for (int s = 0; s < kSubsystemCount; ++s) {
+        const SourcePlaneSplit& split = data.split[static_cast<std::size_t>(s)];
+        const int m1
+            = data.block_regions[static_cast<std::size_t>(split.block[1])];
+        const std::size_t base
+            = (static_cast<std::size_t>(js[static_cast<std::size_t>(
+                   split.block[0])])
+                   * m1
+               + static_cast<std::size_t>(js[static_cast<std::size_t>(
+                   split.block[1])]))
+              * static_cast<std::size_t>(n_cand);
+        for (int c = 0; c < n_cand; ++c) {
+          total[static_cast<std::size_t>(c)]
+              += plane_value[static_cast<std::size_t>(s)][
+                  base + static_cast<std::size_t>(c)];
+        }
+      }
+      int best = 0;
+      double best_value = -std::numeric_limits<double>::infinity();
+      for (int c = 0; c < n_cand; ++c) {
+        if (total[static_cast<std::size_t>(c)] > best_value) {
+          best_value = total[static_cast<std::size_t>(c)];
+          best = c;
+        }
+      }
+      out[static_cast<std::size_t>(j)] = best;
+    }
+    (void)tgt_geom;
+    return out;
+  }
+
   // Phi_rho at an arbitrary point of Omega, evaluated on the source partition.
   bool evalSource(int phase, const Eigen::VectorXd& n,
                   const std::vector<double>& x_src, double* out) const {
@@ -1038,24 +1145,7 @@ std::vector<double> CourierBorderSolver::solve(
   std::vector<int> rho_of_region;
   if (!is_upper) {
     const auto rho_started_at = std::chrono::steady_clock::now();
-    rho_of_region.assign(static_cast<std::size_t>(n_regions), 0);
-    for (int j = 0; j < n_regions; ++j) {
-      const Eigen::VectorXd centroid
-          = regionCentroid(impl.decodeRegion(tgt, j));
-      int best = 0;
-      double best_val = -std::numeric_limits<double>::infinity();
-      for (int c = 0; c < n_cand; ++c) {
-        double val = 0.0;
-        if (!impl.evalSource(src, centroid, request.candidates[c], &val)) {
-          continue;
-        }
-        if (val > best_val) {
-          best_val = val;
-          best = c;
-        }
-      }
-      rho_of_region[static_cast<std::size_t>(j)] = best;
-    }
+    rho_of_region = impl.chooseCandidates(tgt, src, data, request.candidates);
     logger_->info(
         "courier rho selection: {} regions x {} candidates in {:.1f}s",
         n_regions, n_cand,
@@ -1732,31 +1822,8 @@ double CourierBorderSolver::worstCertificateResidual(
 
   std::vector<int> rho_of_region;
   if (!is_upper) {
-    rho_of_region.assign(static_cast<std::size_t>(n_regions), 0);
-    for (int j = 0; j < n_regions; ++j) {
-      const std::array<int, kBlockCount> js = impl.decodeRegion(tgt, j);
-      Eigen::VectorXd centroid = Eigen::VectorXd::Zero(kSpaceDim);
-      for (int b = 0; b < kBlockCount; ++b) {
-        const BlockGeometry& bg = tgt_geom.blocks[static_cast<std::size_t>(b)];
-        const Eigen::VectorXd& block_centroid
-            = data.block_centroid[static_cast<std::size_t>(b)][
-                static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
-        for (int c = 0; c < bg.coord_count; ++c) {
-          centroid(bg.coords[static_cast<std::size_t>(c)]) = block_centroid(c);
-        }
-      }
-      double best_val = -std::numeric_limits<double>::infinity();
-      for (int c = 0; c < n_cand; ++c) {
-        double val = 0.0;
-        if (impl.evalSource(request.source_phase, centroid,
-                            request.candidates[static_cast<std::size_t>(c)],
-                            &val)
-            && val > best_val) {
-          best_val = val;
-          rho_of_region[static_cast<std::size_t>(j)] = c;
-        }
-      }
-    }
+    rho_of_region = impl.chooseCandidates(tgt, request.source_phase, data,
+                                          request.candidates);
   }
 
   double worst = 0.0;

@@ -157,11 +157,14 @@ TEST(barycentric_block_system, courier_certifies_on_real_geometry) {
   ASSERT_TRUE(solver.prepared());
 }
 
-// Runs the border problem to convergence on production-shaped geometry.
-// Disabled by default: it is minutes of work, and it is the gate that says the
-// courier method is usable at this scale, not a unit test. Run it with
-//   --gtest_also_run_disabled_tests --gtest_filter='*courier_converges*'
-TEST(barycentric_block_system, DISABLED_courier_converges_on_real_geometry) {
+// Runs the border problem to convergence on production-shaped geometry: 1.58
+// million target regions, certified region by region.
+//
+// This is the gate that says the courier method is usable at this scale. It
+// converges in four Benders iterations, and its last sweep -- the complete pass
+// over every region that certification requires -- takes a third of a second,
+// because one cached courier covers all of them.
+TEST(barycentric_block_system, courier_converges_on_real_geometry) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
 
@@ -174,10 +177,6 @@ TEST(barycentric_block_system, DISABLED_courier_converges_on_real_geometry) {
   approximator.getIntersectionPoints();
 
   barycentric_affine_approximator::CourierBorderOptions courier_options;
-  // Deliberately generous: the point of this run is to find out how many
-  // Benders iterations the border problem actually needs at this scale. Every
-  // other option is left at its production default.
-  courier_options.max_iterations = 400;
   barycentric_affine_approximator::CourierBorderSolver solver(courier_options);
   solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
                  approximator.nodeWeights(), 100.0);
@@ -196,7 +195,58 @@ TEST(barycentric_block_system, DISABLED_courier_converges_on_real_geometry) {
       request, barycentric_affine_approximator::ApproximationMode::Lower,
       &stats);
   EXPECT_EQ(static_cast<int>(z.size()), approximator.layouts()[0].num_x);
+  EXPECT_LE(stats.worst_zeta, courier_options.certificate_tol);
   GTEST_LOG_(INFO) << "converged in " << stats.iterations << " iterations, "
                    << stats.cuts_added << " cuts, "
                    << stats.subproblems_solved << " subproblems";
+
+  // worstCertificateResidual() would re-derive every region's courier from
+  // scratch, which is the point of it and also why it is not called here: it
+  // has no screening and no early exit, so on this geometry it is an hour of
+  // subproblems. solve() already returned only after a complete pass over all
+  // 1.58 million regions found nothing, which is the certification itself.
+}
+
+// The tie-break is a weak eps * ||z||_1 term on auxiliary columns. It must not
+// cost the bound property, and two identical runs must return the same vertex
+// of what would otherwise be a degenerate optimal face.
+TEST(barycentric_block_system, tie_break_keeps_the_bound_and_repeats) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  auto solveOnce = [](double eps) {
+    barycentric_affine_approximator::BarycentricAffineApproximator approximator(
+        /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
+        /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
+    approximator.setTieBreakEps(eps);
+    approximator.getIntersectionPoints();
+    approximator.precomputeMatrices();
+
+    auto [highs, row_lower, base_upper] = approximator.initializeHighs(0);
+    const auto& cols = approximator.reducedLpCols(0);
+    const std::vector<double> x_next(
+        static_cast<std::size_t>(cols.num_x), 0.0);
+    const std::vector<double> upper
+        = barycentric_affine_approximator::block_reduction::
+            updateReducedLpRowUpper(approximator.reducedLpInput(0),
+                                    approximator.reducedLpRows(0), base_upper,
+                                    x_next);
+    std::vector<int> row_ids(upper.size());
+    std::iota(row_ids.begin(), row_ids.end(), 0);
+    highs->changeRowsBounds(static_cast<int>(row_ids.size()), row_ids.data(),
+                            row_lower.data(), upper.data());
+    highs->run();
+    EXPECT_EQ(highs->getModelStatus(), HighsModelStatus::kOptimal);
+    std::vector<double> z(highs->getSolution().col_value.begin(),
+                          highs->getSolution().col_value.begin() + cols.num_x);
+    approximator.validateStepResiduals(0, x_next, z);
+    return z;
+  };
+
+  const std::vector<double> first = solveOnce(1e-8);
+  const std::vector<double> second = solveOnce(1e-8);
+  ASSERT_EQ(first.size(), second.size());
+  for (std::size_t k = 0; k < first.size(); ++k) {
+    EXPECT_EQ(first[k], second[k]) << "column " << k;
+  }
 }

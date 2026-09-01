@@ -8,7 +8,10 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <stdexcept>
+
+#include <Eigen/Core>
 
 #include <barycentric_affine_approximator.hpp>
 
@@ -64,6 +67,30 @@ TEST(barycentric_smoke, defaults_to_upper_mode) {
 
   approximator.setValidate(true);
   approximator.setValidate(false);
+}
+
+// The per-block CTM data is built by scattering a block centroid into an
+// 8-vector and leaving every coordinate the block does not own as NaN. That is
+// safe because each flow of a block reads only its own two cells -- and this is
+// the other half of the argument: had a NaN been read, all three branch
+// comparisons would be false and getFIJMinResolution would throw rather than
+// pick a branch.
+TEST(barycentric_smoke, flow_resolution_throws_on_unset_coordinates) {
+  using barycentric_affine_approximator::BarycentricAffineApproximator;
+  BarycentricAffineApproximator approximator(300.0, 10, 60.0, 120.0,
+                                             makeParams(), false);
+
+  Eigen::VectorXd finite = Eigen::VectorXd::Constant(8, 10.0);
+  EXPECT_NO_THROW(approximator.getFIJMinResolution(2, 0, finite));
+
+  // Flow f31 reads cells 2 and 0. Blanking either one must stop it.
+  for (const int cell : {2, 0}) {
+    Eigen::VectorXd padded = finite;
+    padded(cell) = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(approximator.getFIJMinResolution(2, 0, padded),
+                 std::invalid_argument)
+        << "cell " << cell;
+  }
 }
 
 TEST(barycentric_smoke, rejects_invalid_construction) {

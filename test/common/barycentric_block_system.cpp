@@ -250,3 +250,60 @@ TEST(barycentric_block_system, tie_break_keeps_the_bound_and_repeats) {
     EXPECT_EQ(first[k], second[k]) << "column " << k;
   }
 }
+
+// Two structural invariants of the assembled block LP that nothing else pins.
+//
+// Psi_b 1 = 0 says a uniform shift of the barycentric node values leaves the
+// gradient alone -- it is what makes the gauge freedom a nullspace of the
+// dynamics and, through that, what the boundedness argument for the objective
+// weights rests on. And Psi_b must touch only the x columns of its own block's
+// projection planes, which is the disjointness the three block rows are summed
+// under.
+TEST(barycentric_block_system, block_psi_rows_are_gauge_free_and_local) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  barycentric_affine_approximator::BarycentricAffineApproximator approximator(
+      /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
+      /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
+  approximator.getIntersectionPoints();
+  approximator.precomputeMatrices();
+
+  for (int phase = 0; phase < barycentric_affine_approximator::kPhases;
+       ++phase) {
+    const auto& input = approximator.reducedLpInput(phase);
+    const auto& geometry
+        = approximator.phaseGeometries()[static_cast<std::size_t>(phase)];
+    const auto& layout
+        = approximator.layouts()[static_cast<std::size_t>(phase)];
+
+    for (int b = 0; b < barycentric_affine_approximator::kBlockCount; ++b) {
+      const auto& block_geometry
+          = geometry.blocks[static_cast<std::size_t>(b)];
+      // The x columns this block is allowed to touch.
+      std::vector<bool> owned(static_cast<std::size_t>(layout.num_x), false);
+      for (int l = 0; l < block_geometry.layer_count; ++l) {
+        const int s = block_geometry.layer_ids[static_cast<std::size_t>(l)];
+        for (int k = 0; k < layout.eta_s[static_cast<std::size_t>(s)]; ++k) {
+          owned[static_cast<std::size_t>(layout.idxX(s, k))] = true;
+        }
+      }
+
+      const auto& regions = input.blocks[static_cast<std::size_t>(b)].regions;
+      for (std::size_t j = 0; j < regions.size(); ++j) {
+        for (const auto& row : regions[j].psi_rows) {
+          double mass = 0.0;
+          for (std::size_t i = 0; i < row.cols.size(); ++i) {
+            EXPECT_TRUE(owned[static_cast<std::size_t>(row.cols[i])])
+                << "phase " << phase << " block " << b << " cell " << j
+                << " touches column " << row.cols[i]
+                << " outside its own projection planes";
+            mass += row.vals[i];
+          }
+          EXPECT_NEAR(mass, 0.0, 1e-9)
+              << "phase " << phase << " block " << b << " cell " << j;
+        }
+      }
+    }
+  }
+}

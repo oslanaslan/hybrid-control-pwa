@@ -386,10 +386,12 @@ int subTCol(int block) { return kSubZetaCol + 1 + block; }
 // Every coefficient this guards is a geometric coordinate -- a state coordinate
 // of a region vertex, or a coordinate of a clipped source vertex -- whose true
 // value is zero wherever the cell touches the boundary of the box; the 1e-13
-// that arrives instead is arrangement rounding. Doing the snap here rather than
-// leaving it to HiGHS keeps addRows at kOk, so a warning from it stays a real
-// signal instead of routine noise. Structural +-1 coefficients never go through
-// this path.
+// that arrives instead is arrangement rounding. The threshold sits a full order
+// below kGeomEps, the tolerance the arrangement itself is built to, so a
+// coordinate this small is below the geometry's own resolution and snapping it
+// is more faithful than keeping it. Doing the snap here rather than leaving it
+// to HiGHS keeps addRows at kOk, so a warning from it stays a real signal
+// instead of routine noise. Structural +-1 coefficients never take this path.
 void pushEntry(std::vector<int>& index, std::vector<double>& value, int column,
                double entry) {
   if (std::abs(entry) <= kHighsSmallMatrixValue) {

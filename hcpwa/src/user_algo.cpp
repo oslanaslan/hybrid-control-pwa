@@ -22,6 +22,113 @@ namespace hcpwa {
 // NOLINTNEXTLINE
 using namespace hcpwa::symbols;
 
+namespace {
+
+// Packs the cells of one three-coordinate block. indices[i] is the pair of
+// prism ids that produced cell i, and prisms are built one per triangle in the
+// same order, so those ids are the triangle ids of the block's two planes.
+BlockRegions packBlockRegions(
+    std::array<int, kMaxBlockCoords> coords, int coord_count,
+    std::array<int, kMaxBlockLayers> layer_ids, int layer_count,
+    const std::vector<std::vector<std::size_t>>& indices,
+    const std::vector<std::vector<hcpwa::Vec<3>>>& points) {
+  if (indices.size() != points.size()) {
+    throw std::runtime_error(
+        "packBlockRegions: cell index and vertex arrays disagree");
+  }
+  BlockRegions out;
+  out.coords = coords;
+  out.coord_count = coord_count;
+  out.layer_ids = layer_ids;
+  out.layer_count = layer_count;
+  out.triangle_ids.reserve(indices.size());
+  out.vertices.reserve(points.size());
+  out.aabb.reserve(points.size());
+
+  for (std::size_t cell = 0; cell < points.size(); ++cell) {
+    if (static_cast<int>(indices[cell].size()) != layer_count) {
+      throw std::runtime_error(
+          "packBlockRegions: cell has the wrong number of prism ids");
+    }
+    std::array<int, kMaxBlockLayers> ids{};
+    for (int l = 0; l < layer_count; ++l) {
+      ids[static_cast<std::size_t>(l)]
+          = static_cast<int>(indices[cell][static_cast<std::size_t>(l)]);
+    }
+    out.triangle_ids.push_back(ids);
+
+    std::vector<std::array<double, kMaxBlockCoords>> verts;
+    verts.reserve(points[cell].size());
+    BlockAabb box;
+    box.lower.fill(std::numeric_limits<double>::infinity());
+    box.upper.fill(-std::numeric_limits<double>::infinity());
+    for (const auto& point : points[cell]) {
+      std::array<double, kMaxBlockCoords> v{};
+      for (int c = 0; c < coord_count; ++c) {
+        v[static_cast<std::size_t>(c)]
+            = static_cast<double>(point[c]);
+        box.lower[static_cast<std::size_t>(c)] = std::min(
+            box.lower[static_cast<std::size_t>(c)],
+            v[static_cast<std::size_t>(c)]);
+        box.upper[static_cast<std::size_t>(c)] = std::max(
+            box.upper[static_cast<std::size_t>(c)],
+            v[static_cast<std::size_t>(c)]);
+      }
+      verts.push_back(v);
+    }
+    if (verts.empty()) {
+      throw std::runtime_error("packBlockRegions: empty cell");
+    }
+    out.vertices.push_back(std::move(verts));
+    out.aabb.push_back(box);
+  }
+  return out;
+}
+
+// The single-plane block, whose cells are the triangles of that plane.
+BlockRegions packTriangleBlock(
+    std::array<int, kMaxBlockCoords> coords, int layer_id,
+    const std::vector<hcpwa::TriangleWithUniqueVertices>& triangles) {
+  BlockRegions out;
+  out.coords = coords;
+  out.coord_count = 2;
+  out.layer_ids[0] = layer_id;
+  out.layer_count = 1;
+  out.triangle_ids.reserve(triangles.size());
+  out.vertices.reserve(triangles.size());
+  out.aabb.reserve(triangles.size());
+
+  for (std::size_t t = 0; t < triangles.size(); ++t) {
+    std::array<int, kMaxBlockLayers> ids{};
+    ids[0] = static_cast<int>(t);
+    out.triangle_ids.push_back(ids);
+
+    std::vector<std::array<double, kMaxBlockCoords>> verts;
+    BlockAabb box;
+    box.lower.fill(std::numeric_limits<double>::infinity());
+    box.upper.fill(-std::numeric_limits<double>::infinity());
+    for (std::size_t k = 0; k < triangles[t].size(); ++k) {
+      const auto& point = triangles[t][k];
+      std::array<double, kMaxBlockCoords> v{};
+      for (int c = 0; c < 2; ++c) {
+        v[static_cast<std::size_t>(c)] = static_cast<double>(point[c]);
+        box.lower[static_cast<std::size_t>(c)] = std::min(
+            box.lower[static_cast<std::size_t>(c)],
+            v[static_cast<std::size_t>(c)]);
+        box.upper[static_cast<std::size_t>(c)] = std::max(
+            box.upper[static_cast<std::size_t>(c)],
+            v[static_cast<std::size_t>(c)]);
+      }
+      verts.push_back(v);
+    }
+    out.vertices.push_back(std::move(verts));
+    out.aabb.push_back(box);
+  }
+  return out;
+}
+
+}  // namespace
+
 PolygonResolutions compute_polygon_resolutions(
     double N, double F, double v, double w, double b51, double b57, double b84,
     double b86, double b31, double b36, double b24, double b27, double f2min,
@@ -672,7 +779,7 @@ PhaseIntersectionResult compute_intersection_points(
     const std::vector<hcpwa::LineSet<8>>& prisms23,
     const std::vector<hcpwa::TriangleWithUniqueVertices>& triangles58,
     const std::vector<hcpwa::TriangleWithUniqueVertices>& triangles23,
-    hcpwa::Float N, bool verbose) {
+    hcpwa::Float N, bool verbose, const TriangleGeometryOptions& options) {
   hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
   const auto aabb3d_bounds = hcpwa::AABBBounds(aabb3d);
 
@@ -768,6 +875,24 @@ PhaseIntersectionResult compute_intersection_points(
   computend({3, 5, 7}, aabb3d_bounds, prisms84, prisms86, "468", verbose,
             intersection_prism_indices_468, intersection_points_468);
 
+  // The block factorisation of both phases. Phase 0 splits its coordinates as
+  // {0,2,5} / {1,3,6} / {4,7} and phase 1 as {0,4,6} / {3,5,7} / {1,2}; the
+  // cells are exactly what the four computend() calls above just produced, plus
+  // the triangles of the remaining single plane. Coordinate order inside a
+  // block follows the order the 8D vertex is assembled in below.
+  std::array<BlockRegions, kBlockCount> blocks_phase0 = {
+      packBlockRegions({0, 2, 5}, 3, {0, 1}, 2, intersection_prism_indices_136,
+                       intersection_points_136),
+      packBlockRegions({1, 3, 6}, 3, {2, 3}, 2, intersection_prism_indices_247,
+                       intersection_points_247),
+      packTriangleBlock({4, 7, 0}, 4, triangles58)};
+  std::array<BlockRegions, kBlockCount> blocks_phase1 = {
+      packBlockRegions({0, 4, 6}, 3, {0, 1}, 2, intersection_prism_indices_157,
+                       intersection_points_157),
+      packBlockRegions({3, 5, 7}, 3, {2, 3}, 2, intersection_prism_indices_468,
+                       intersection_points_468),
+      packTriangleBlock({1, 2, 0}, 4, triangles23)};
+
   if (verbose) {
     std::cout << "Intersection counted:" << std::endl;
     std::cout << "\t136 count: " << intersection_points_136.size() << std::endl;
@@ -835,8 +960,13 @@ PhaseIntersectionResult compute_intersection_points(
         // simplex, so every vertex triple must be emitted. Bound the loops by
         // the vertex arrays, not by intersection_prism_indices_*, which always
         // holds exactly the two prism ids {idx0, idx1} that formed the cell.
+        //
+        // That product is what the block factorisation above replaces, so it is
+        // only materialised on request.
         for (size_t j136 = 0;
-             j136 < intersection_points_136[i136].size(); j136++) {
+             options.build_8d_vertices
+             && j136 < intersection_points_136[i136].size();
+             j136++) {
           for (size_t j247 = 0;
                j247 < intersection_points_247[i247].size(); j247++) {
             for (size_t j58 = 0; j58 < triangles58[i58].size(); j58++) {
@@ -919,7 +1049,9 @@ PhaseIntersectionResult compute_intersection_points(
         // See the phase-0 note above: bound by the vertex arrays, not by the
         // two-element prism-index arrays.
         for (size_t j157 = 0;
-             j157 < intersection_points_157[i157].size(); j157++) {
+             options.build_8d_vertices
+             && j157 < intersection_points_157[i157].size();
+             j157++) {
           for (size_t j468 = 0;
                j468 < intersection_points_468[i468].size(); j468++) {
             for (size_t j23 = 0; j23 < triangles23[i23].size(); j23++) {
@@ -948,7 +1080,31 @@ PhaseIntersectionResult compute_intersection_points(
   }
   report_phase1_progress(true);
 
+  // A block cell that LinesToPoints dropped would silently delete a whole
+  // M / M_b slice of regions from the LP, so the product of the block counts is
+  // checked against the regions that were actually emitted.
+  const std::size_t expected_phase0 = blocks_phase0[0].num_regions()
+                                      * blocks_phase0[1].num_regions()
+                                      * blocks_phase0[2].num_regions();
+  if (expected_phase0 != intersection_prism_indices_phase0.size()) {
+    throw std::runtime_error(std::format(
+        "compute_intersection_points: phase 0 has {} regions but the block "
+        "counts multiply out to {}",
+        intersection_prism_indices_phase0.size(), expected_phase0));
+  }
+  const std::size_t expected_phase1 = blocks_phase1[0].num_regions()
+                                      * blocks_phase1[1].num_regions()
+                                      * blocks_phase1[2].num_regions();
+  if (expected_phase1 != intersection_prism_indices_phase1.size()) {
+    throw std::runtime_error(std::format(
+        "compute_intersection_points: phase 1 has {} regions but the block "
+        "counts multiply out to {}",
+        intersection_prism_indices_phase1.size(), expected_phase1));
+  }
+
   PhaseIntersectionResult result;
+  result.blocks_phase0 = std::move(blocks_phase0);
+  result.blocks_phase1 = std::move(blocks_phase1);
   result.intersection_prism_indices_phase0
       = std::move(intersection_prism_indices_phase0);
   result.intersection_points_phase0 = std::move(intersection_points_phase0);
@@ -1255,7 +1411,8 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
     double N, double F, double v, double w, double b51, double b57, double b84,
     double b86, double b31, double b36, double b24, double b27, double f2min,
     double f3min, double f5min, double f8min, double f2max, double f3max,
-    double f5max, double f8max, bool verbose) {
+    double f5max, double f8max, bool verbose,
+    const TriangleGeometryOptions& options) {
   // Compute polygon min resolutions (splits) for each hyperplane
   auto polygon_resolutions = compute_polygon_resolutions(
       N, F, v, w, b51, b57, b84, b86, b31, b36, b24, b27, f2min, f3min, f5min,
@@ -1301,7 +1458,7 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
   auto intersection_result = compute_intersection_points(
       prisms31, prisms36, prisms24, prisms27, prisms58, prisms51, prisms57,
       prisms84, prisms86, prisms23, polygons58, polygons23,
-      static_cast<hcpwa::Float>(N), verbose);
+      static_cast<hcpwa::Float>(N), verbose, options);
   auto& intersection_points_phase0
       = intersection_result.intersection_points_phase0;
   auto& intersection_prism_indices_phase0
@@ -1329,6 +1486,8 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
   result.intersection_prism_indices_phase0 = intersection_prism_indices_phase0;
   result.intersection_points_phase1 = intersection_points_phase1;
   result.intersection_prism_indices_phase1 = intersection_prism_indices_phase1;
+  result.blocks_phase0 = std::move(intersection_result.blocks_phase0);
+  result.blocks_phase1 = std::move(intersection_result.blocks_phase1);
 
   if (verbose) {
     std::cout << "result.triangles31.size(): " << result.triangles31.size()

@@ -300,6 +300,18 @@ class BarycentricAffineApproximator {
     return reduced_cols_[static_cast<std::size_t>(phase)];
   }
 
+  // Read-only views of the ingested geometry, for diagnostics and for driving
+  // the border solver outside run().
+  const std::array<PhaseGeometry, kPhases>& phaseGeometries() const {
+    return phase_geometries_;
+  }
+  const std::array<BarycentricVarLayout, kPhases>& layouts() const {
+    return layouts_;
+  }
+  const std::array<Eigen::VectorXd, kPhases>& nodeWeights() const {
+    return node_weights_;
+  }
+
   void run(const std::string& output_folder_path, int n_threads = 2);
 
   void dumpInitParamsToJson(const std::string& filepath) const;

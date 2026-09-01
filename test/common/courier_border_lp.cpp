@@ -149,6 +149,11 @@ Fixture makeFixture() {
       }
       geom.region_triangle_ids.push_back(tuple);
     }
+    // The solver works block by block; blockGeometryFromRegions is the same
+    // ingestion the approximator uses, so the fixture cannot disagree with it
+    // about what a block is.
+    geom.blocks = barycentric_affine_approximator::blockGeometryFromRegions(
+        phase, phase == 0 ? inter.blocks_phase0 : inter.blocks_phase1);
 
     BarycentricVarLayout layout;
     for (int s = 0; s < kSubsystemCount; ++s) {

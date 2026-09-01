@@ -151,8 +151,11 @@ class CourierBorderSolver {
                                   ApproximationMode mode,
                                   const std::vector<double>& z) const;
 
- private:
+  // Exposed only so the file-local subproblem builder can name it; the type
+  // itself stays private to the .cpp.
   struct Impl;
+
+ private:
   // shared_ptr, not unique_ptr, and deliberately so: unique_ptr to an
   // incomplete type forces a user-declared destructor, which would delete the
   // implicit move constructor of this class and, through it, of

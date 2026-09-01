@@ -6,6 +6,7 @@
 #include <Highs.h>
 
 #include <barycentric_affine_approximator.hpp>
+#include <courier_border_solver.hpp>
 
 #include "cddwrap/cdd.hpp"
 #include "utility.hpp"
@@ -124,4 +125,30 @@ TEST(barycentric_block_system, one_reduced_step_solves_and_is_a_bound) {
       approximator.validateStepResiduals(phase, x_next, z);
     }
   }
+}
+
+// The courier border solver on the same production-shaped geometry. Its
+// subproblem is reduced over the same blocks: condition (a) splits because
+// every target plane lies inside one block and every courier term
+// c_s[k] * nu_axis is a single coordinate, so the maximum over the product of
+// vertices is the sum of the per-block maxima. The same vertices are checked,
+// just counted differently.
+TEST(barycentric_block_system, courier_certifies_on_real_geometry) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  barycentric_affine_approximator::BarycentricAffineApproximator approximator(
+      /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
+      /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
+  hcpwa::TriangleGeometryOptions options;
+  options.build_8d_vertices = false;
+  approximator.setGeometryOptions(options);
+  approximator.getIntersectionPoints();
+
+  barycentric_affine_approximator::CourierBorderOptions courier_options;
+  courier_options.max_iterations = 8;
+  barycentric_affine_approximator::CourierBorderSolver solver(courier_options);
+  solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
+                 approximator.nodeWeights(), 100.0);
+  ASSERT_TRUE(solver.prepared());
 }

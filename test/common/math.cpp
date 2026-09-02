@@ -144,8 +144,12 @@ TEST(math, prism1) {
     hcpwa::Triangle triangle = {{0, 0}, {0, 1}, {1, 0}};
     auto prism = hcpwa::CalcPrism(triangle, {0, 1});
 
-    const hcpwa::Vec<8> inside{0.4, 0.4, 0};
-    const hcpwa::Vec<8> outside{-0.5, 0.5, 0};
+    // All eight components, not three: Apply() sums over every one of them,
+    // and the prism's coefficients are zero outside dims -- but 0 * an
+    // indeterminate value is NaN when the bits happen to spell one. This test
+    // passed in Debug only because the stack was zero there; -O3 exposes it.
+    const hcpwa::Vec<8> inside{0.4, 0.4, 0, 0, 0, 0, 0, 0};
+    const hcpwa::Vec<8> outside{-0.5, 0.5, 0, 0, 0, 0, 0, 0};
 
     ASSERT_EQ(prism.size(), 3);
 
@@ -162,8 +166,9 @@ TEST(math, prism2) {
     hcpwa::Triangle triangle = {{0, 0}, {0, 1}, {1, 0}};
     auto prism = hcpwa::CalcPrism(triangle, {0, 2});
 
-    const hcpwa::Vec<8> inside{0.4, 1, 0.4, 0};
-    const hcpwa::Vec<8> outside{-0.5, 0, 0.5, 0};
+    // See prism1: every component must be initialised.
+    const hcpwa::Vec<8> inside{0.4, 1, 0.4, 0, 0, 0, 0, 0};
+    const hcpwa::Vec<8> outside{-0.5, 0, 0.5, 0, 0, 0, 0, 0};
 
     ASSERT_EQ(prism.size(), 3);
 

@@ -54,7 +54,14 @@ struct CourierBorderOptions {
   // Certification tolerance on the phase-I objective zeta*. Must sit above the
   // HiGHS feasibility tolerance, otherwise certified regions would re-report as
   // violated forever.
-  double certificate_tol = 1e-6;
+  //
+  // It used to be 1e-6, which is exactly kHighsSolutionTol and so did not
+  // satisfy its own requirement: a zeta of 1e-6 is indistinguishable from zero
+  // to the solver that produced it, the cut built for such a region is not
+  // obliged to separate anything, and the separation guard below rejected it.
+  // Two orders of margin, matching what kDualIdentityTol needs for the same
+  // reason.
+  double certificate_tol = 1e-4;
 
   // Rows of the seeded master relaxation. 0 disables seeding.
   int max_seed_rows = 8192;

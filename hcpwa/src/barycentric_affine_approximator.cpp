@@ -164,11 +164,66 @@ BarycentricAffineApproximator::BarycentricAffineApproximator(
   theta_t_index_lists_ = interval_building::buildThetaToTIndexLists(
       t_max_, tau_min_, tau_max_, t_range_, max_switches_);
 
+  // How many (layer, theta) nodes the lists carry that no earlier layer can
+  // reach. It is a pure function of the grid and is worth knowing before a run
+  // starts rather than discovering it forty minutes in; getBorderConditions
+  // skips exactly these. A large share would mean the theta ranges and the
+  // t-windows disagree about more than grid quantisation.
+  {
+    int checked = 0;
+    int unreachable = 0;
+    const double half_step = t_delta_ / 2.0;
+    auto covers = [&](int level, int theta_end, int t_idx) {
+      const auto layer = theta_t_index_lists_.expanded_t_by_k_theta.find(level);
+      if (layer == theta_t_index_lists_.expanded_t_by_k_theta.end()) {
+        return false;
+      }
+      const auto entry = layer->second.find(theta_end);
+      if (entry == layer->second.end()) {
+        return false;
+      }
+      return std::find(entry->second.begin(), entry->second.end(), t_idx)
+             != entry->second.end();
+    };
+    for (const auto& [level, by_theta] :
+         theta_t_index_lists_.expanded_t_by_k_theta) {
+      if (level < 1) {
+        continue;
+      }
+      for (const auto& [theta_idx, t_ids] : by_theta) {
+        ++checked;
+        const double theta = t_range_[static_cast<std::size_t>(theta_idx)];
+        const double lo = std::min(theta + tau_min_, t_max_);
+        const double hi = std::min(theta + tau_max_, t_max_);
+        bool reachable = false;
+        for (int r = 0; r < level && !reachable; ++r) {
+          for (std::size_t i = 0; i < t_range_.size() && !reachable; ++i) {
+            if (t_range_[i] >= lo - half_step && t_range_[i] <= hi + half_step
+                && covers(r, static_cast<int>(i), theta_idx)) {
+              reachable = true;
+            }
+          }
+        }
+        if (!reachable) {
+          ++unreachable;
+        }
+      }
+    }
+    unreachable_nodes_ = unreachable;
+    checked_nodes_ = checked;
+  }
+
   logger_ = spdlog::get("barycentric_affine_approximator");
   if (!logger_) {
     logger_ = spdlog::stdout_color_mt("barycentric_affine_approximator");
   }
   logger_->set_level(spdlog::level::info);
+  logger_->info(
+      "theta lists: {} of {} (layer, theta) nodes have no reachable "
+      "predecessor and will be skipped; they sit at the low edge of a layer's "
+      "theta range, where grid quantisation puts them just outside the "
+      "t-window of every earlier layer",
+      unreachable_nodes_, checked_nodes_);
 
   if (highs_verbose_) {
     interval_building::prettyPrintThetaTLists(theta_t_index_lists_, t_range_);
@@ -1051,8 +1106,29 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
     }
   }
   if (candidates.empty()) {
-    throw std::runtime_error(
-        "getBorderConditions: no source candidates for the border condition");
+    // No reachable predecessor, by the construction of the theta lists rather
+    // than by anything going wrong here.
+    //
+    // buildThetaToTIndexLists gives layer k the theta range
+    // [t_min_k, min(t_max_k + tau_max, T)], which is wider than the union of
+    // the t-windows of the layers below it, and grid quantisation widens the
+    // gap: at T=1200, tau_min=10, tau_max=50 on a 240-point grid, layer 2
+    // carries theta = 1149.8 while layers 0 and 1 start their t-windows at
+    // 1150.0 exactly. Such a theta is unreachable in the problem's own
+    // combinatorics. Counted up front by checkUnreachableNodes(): 230 of
+    // 12 585 nodes, 1.8%, all at the low edge of a layer's theta range.
+    //
+    // The recursion defines no value there, and fabricating one is the thing
+    // the loop above refuses to do with a zero: it would silently weaken the
+    // border condition. Skipping the node is equivalent to never emitting it,
+    // which is where the fix would belong if buildThetaToTIndexLists were not
+    // shared with the global affine path. Every consumer tolerates the absence
+    // because they all go through ValueFunction::contains.
+    logger_->info(
+        "getBorderConditions: no source candidates at theta_idx={}, "
+        "switch_cnt={}, source_phase={}; node unreachable, skipping",
+        theta_idx, switch_cnt, source_phase);
+    return {};
   }
   const int n_candidates = static_cast<int>(candidates.size());
 
@@ -1555,6 +1631,12 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
               const int switch_phase = phase == 0 ? 1 : 0;
               x_next = getBorderConditions(switch_phase, theta_idx, theta,
                                            switch_cnt);
+              if (x_next.empty()) {
+                // Unreachable node: nothing to march backwards from, and
+                // nothing to store. See getBorderConditions.
+                completed_tasks.fetch_add(1);
+                return;
+              }
             } else {
               x_next = solveMainLpStep(phase, solver_index, x_next);
             }

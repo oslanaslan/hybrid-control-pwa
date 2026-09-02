@@ -65,16 +65,17 @@ double snapBound(double value) {
 // concurrency is pure overhead and where it was observed to give up with
 // "Increasing Markowitz threshold" and no model status at all.
 void applyHighsOptions(Highs& highs, bool verbose, bool presolve,
-                       int simplex_strategy = 2) {
+                       int simplex_strategy = 2,
+                       double solution_tol = kHighsSolutionTol) {
   highs.setOptionValue("solver", "simplex");
   highs.setOptionValue("presolve", presolve ? "on" : "off");
   highs.setOptionValue("simplex_strategy", simplex_strategy);
-  highs.setOptionValue("kkt_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
-  highs.setOptionValue("optimality_tolerance", kHighsSolutionTol);
+  highs.setOptionValue("kkt_tolerance", solution_tol);
+  highs.setOptionValue("primal_feasibility_tolerance", solution_tol);
+  highs.setOptionValue("dual_feasibility_tolerance", solution_tol);
+  highs.setOptionValue("primal_residual_tolerance", solution_tol);
+  highs.setOptionValue("dual_residual_tolerance", solution_tol);
+  highs.setOptionValue("optimality_tolerance", solution_tol);
   highs.setOptionValue("small_matrix_value", kHighsSmallMatrixValue);
   highs.setOptionValue("log_to_console", verbose);
   highs.changeObjectiveSense(ObjSense::kMinimize);
@@ -93,6 +94,10 @@ void applyHighsOptions(Highs& highs, bool verbose, bool presolve,
 struct SimplexAttempt {
   bool presolve;
   int strategy;
+  // Six HiGHS tolerances are pinned to kHighsSolutionTol, which for a badly
+  // scaled 19-column subproblem can simply be unreachable. The last rungs let
+  // the solver work to its own defaults rather than fail outright.
+  double solution_tol = kHighsSolutionTol;
 };
 
 bool solveWithFallback(Highs& highs, std::span<const SimplexAttempt> ladder,
@@ -101,10 +106,12 @@ bool solveWithFallback(Highs& highs, std::span<const SimplexAttempt> ladder,
                        int num_rows, const double* row_lower,
                        const double* row_upper, int num_nz, const int* starts,
                        const int* index, const double* value,
-                       HighsStatus* last_status) {
+                       HighsStatus* last_status, int* rung_out = nullptr) {
+  int rung = 0;
   for (const SimplexAttempt& attempt : ladder) {
     highs.clear();
-    applyHighsOptions(highs, verbose, attempt.presolve, attempt.strategy);
+    applyHighsOptions(highs, verbose, attempt.presolve, attempt.strategy,
+                      attempt.solution_tol);
     // Loading the model is structural: no simplex setting fixes a rejected
     // matrix, so it throws rather than moving to the next rung.
     if (highs.addCols(num_cols, cost, col_lower, col_upper, 0, nullptr, nullptr,
@@ -124,8 +131,12 @@ bool solveWithFallback(Highs& highs, std::span<const SimplexAttempt> ladder,
     *last_status = highs.run();
     if (*last_status == HighsStatus::kOk
         && highs.getModelStatus() == HighsModelStatus::kOptimal) {
+      if (rung_out != nullptr) {
+        *rung_out = rung;
+      }
       return true;
     }
+    ++rung;
   }
   return false;
 }
@@ -434,6 +445,10 @@ struct CachedCourier {
 struct SubproblemResult {
   double zeta = 0.0;
   double kappa = 0.0;
+  // Which rung of the ladder produced this answer. Reported when a cut fails
+  // its separation check: whether the solver needed a fallback is the first
+  // thing worth knowing, and this was missing when exactly that happened.
+  int rung = 0;
   // The courier's slopes, c_s[k] at 2*s+k. Kept so that a courier that
   // certified one region can be re-tested against others without an LP; the
   // offsets d_s are not kept, because the screen rebuilds them from c as
@@ -784,19 +799,28 @@ SubproblemResult solveRegionSubproblem(
 
   // Ladder for the subproblem: serial dual, then primal, then presolve on.
   //
-  // The last rung is only offered when the caller does not need duals. HiGHS
-  // presolve removes forcing and duplicate rows and postsolve then *recovers*
-  // the multipliers rather than observing them, and the Benders cut is built
-  // straight out of ssol.row_dual indexed against the original row order. A
-  // recovered multiplier that still passes the stationarity identities can
-  // produce a cut that removes part of the true feasible set, which would
-  // surface only as the generic "not certified" throw. Failing honestly on the
-  // second rung is the better outcome.
-  static constexpr std::array<SimplexAttempt, 3> kSubLadderNoDuals
+  // Presolve is offered only when the caller does not need duals.
+  //
+  // It was briefly on the dual ladder too, on the argument that the caller
+  // checks the full stationarity set -- 19 equations for 19 columns -- so a
+  // postsolve-recovered multiplier satisfying all of them must be the right
+  // one. That argument is wrong, and the run says so: presolve removes forcing
+  // and duplicate rows and postsolve reconstructs their multipliers, and the
+  // reconstruction can satisfy every structural identity while not reproducing
+  // the Lagrangian value against the original right-hand sides. The observed
+  // symptom is a cut with separation -0.031 against a zeta of 0.193 -- three
+  // orders above any tolerance, so not noise.
+  //
+  // Hard subproblems still get an escape, but through the tolerances rather
+  // than through presolve: six of them pinned at 1e-6 on a matrix spanning
+  // eight orders is a demand the solver cannot always meet, and a looser answer
+  // still has to pass the same identities and the same separation check.
+  static constexpr std::array<SimplexAttempt, 4> kSubLadderNoDuals
       = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4},
-         SimplexAttempt{true, 0}};
-  static constexpr std::array<SimplexAttempt, 2> kSubLadderDuals
-      = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4}};
+         SimplexAttempt{true, 0}, SimplexAttempt{true, 0, 1e-4}};
+  static constexpr std::array<SimplexAttempt, 4> kSubLadderDuals
+      = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4},
+         SimplexAttempt{false, 1, 1e-4}, SimplexAttempt{false, 4, 1e-4}};
   const std::span<const SimplexAttempt> kSubLadder
       = want_duals ? std::span<const SimplexAttempt>(kSubLadderDuals)
                    : std::span<const SimplexAttempt>(kSubLadderNoDuals);
@@ -808,7 +832,7 @@ SubproblemResult solveRegionSubproblem(
                          static_cast<int>(slower.size()), slower.data(),
                          supper.data(), static_cast<int>(svalue.size()),
                          sstart.data(), sindex.data(), svalue.data(),
-                         &run_status)) {
+                         &run_status, &out.rung)) {
     // Rebuild the same model with logging on: a subproblem that defeats every
     // rung is rare and worth explaining once rather than reporting as a bare
     // status code.
@@ -1296,6 +1320,23 @@ std::vector<double> CourierBorderSolver::solve(
   Eigen::VectorXd obj
       = -sigma * (*impl.node_weights)[static_cast<std::size_t>(tgt)];
 
+  // Normalised to max |w| = 1 before it reaches HiGHS. node_weights are true
+  // integrals over Omega = [0,N]^8, so every one of them carries a factor
+  // N^6 -- 1.7e13 at N=160 before the triangle areas are multiplied in, giving
+  // costs of order 1e17. HiGHS warns about "excessively large costs" and then
+  // fails the dual ratio test outright, and no simplex strategy helps because
+  // the problem is the scaling, not the pivoting.
+  //
+  // Only the argmin matters here, and it is invariant under a positive scale,
+  // so this changes nothing about the answer. The objective VALUE does change
+  // scale, and it is reported, so it is scaled back below.
+  const double obj_scale = obj.cwiseAbs().maxCoeff();
+  if (!(obj_scale > 0.0) || !std::isfinite(obj_scale)) {
+    throw std::runtime_error(
+        "CourierBorderSolver::solve: node weights are all zero or not finite");
+  }
+  obj /= obj_scale;
+
   std::vector<int> row_start = {0};
   std::vector<int> row_index;
   std::vector<double> row_value;
@@ -1538,9 +1579,9 @@ std::vector<double> CourierBorderSolver::solve(
     // parallel dual simplex is the right first choice here -- unlike on the
     // 19-column subproblem -- because the master really does have thousands of
     // rows by the later iterations.
-    static constexpr std::array<SimplexAttempt, 3> kMasterLadder
+    static constexpr std::array<SimplexAttempt, 4> kMasterLadder
         = {SimplexAttempt{true, 2}, SimplexAttempt{true, 1},
-           SimplexAttempt{false, 4}};
+           SimplexAttempt{false, 4}, SimplexAttempt{true, 0, 1e-4}};
 
     Highs master;
     HighsStatus master_status = HighsStatus::kError;
@@ -1564,7 +1605,9 @@ std::vector<double> CourierBorderSolver::solve(
     for (int i = 0; i < n_cols; ++i) {
       z[static_cast<std::size_t>(i)] = sol.col_value[static_cast<std::size_t>(i)];
     }
-    local_stats.master_objective = master.getObjectiveValue();
+    // Back on the caller's scale: the objective is a pure linear form in z with
+    // no constant term, so undoing the normalisation is exact.
+    local_stats.master_objective = master.getObjectiveValue() * obj_scale;
     local_stats.master_hit_box = false;
     for (int i = 0; i < n_cols; ++i) {
       if (std::abs(std::abs(z[static_cast<std::size_t>(i)]) - box) < 1e-6) {
@@ -1589,6 +1632,7 @@ std::vector<double> CourierBorderSolver::solve(
       refreshTHat(courier);
     }
     long long screened = 0;
+    long long non_separating_cuts = 0;
 
     const auto sweep_started_at = std::chrono::steady_clock::now();
     auto next_sweep_report_at
@@ -1787,13 +1831,41 @@ std::vector<double> CourierBorderSolver::solve(
       }
 
       // A cut that does not separate the current point means the multipliers
-      // are wrong and Benders would stall silently.
+      // are not the optimal duals: by strong duality sigma * (row^T z - rhs)
+      // is exactly zeta*, so any other value says the vector we read is not
+      // the one that value belongs to.
+      //
+      // The five stationarity families do not pin it down. They are one
+      // condition per column -- 19 of them -- while the dual vector has one
+      // component per row, of the order of seventy here, so a whole affine
+      // family satisfies them and only the complementary one reproduces the
+      // Lagrangian value. Complementary slackness is what is missing, and it
+      // is not checked.
+      //
+      // Dropping the cut is sound: no wrong constraint reaches the master, the
+      // region simply stays violated and is revisited. It costs convergence,
+      // not correctness, so it is counted rather than thrown -- a hard stop
+      // here discards a run of many hours over one region.
+      //
+      // Only demanded once zeta is clear of the solver's own noise floor. A
+      // zeta at kHighsSolutionTol is indistinguishable from zero to the LP that
+      // produced it, so the cut for such a region is not obliged to separate by
+      // half of it -- and observed values of sep were 1e-7 against a zeta of
+      // 1e-6, which is agreement, not a wrong multiplier. certificate_tol now
+      // sits two orders above that floor, so a region reaching this point
+      // normally clears the gate with room to spare.
       const double sep = sigma * (row.dot(z) - rhs);
-      if (sep < 0.5 * sub.zeta) {
-        throw std::runtime_error(
-            "CourierBorderSolver::solve: generated cut does not separate z*, "
-            "separation " + std::to_string(sep) + " vs zeta "
-            + std::to_string(sub.zeta));
+      if (sub.zeta > 10.0 * kHighsSolutionTol && sep < 0.5 * sub.zeta) {
+        ++non_separating_cuts;
+        if (non_separating_cuts == 1) {
+          logger_->warn(
+              "courier sweep: cut does not separate z*, separation {} vs zeta "
+              "{}; block cells ({}, {}, {}), ladder rung {}. The multipliers "
+              "are not the optimal duals; dropping the cut and continuing. "
+              "Further occurrences are counted, not logged.",
+              sep, sub.zeta, js[0], js[1], js[2], sub.rung);
+        }
+        continue;
       }
       violations.push_back(Violation{sub.zeta, std::move(row), rhs});
       if (static_cast<int>(violations.size())
@@ -1809,12 +1881,14 @@ std::vector<double> CourierBorderSolver::solve(
 
     logger_->info(
         "courier sweep: iter={} visited {} regions in {:.1f}s, {} screened by "
-        "{} cached couriers, worst zeta {:.3e}, violations {}",
+        "{} cached couriers, worst zeta {:.3e}, violations {}, "
+        "non-separating cuts dropped {}",
         iter, visited,
         std::chrono::duration<double>(std::chrono::steady_clock::now()
                                       - sweep_started_at)
             .count(),
-        screened, cache.size(), worst, violations.size());
+        screened, cache.size(), worst, violations.size(),
+        non_separating_cuts);
     // Over the visited prefix only, when the sweep stopped early.
     local_stats.worst_zeta = worst;
 

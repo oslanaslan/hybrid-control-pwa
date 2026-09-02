@@ -142,6 +142,10 @@ class BarycentricAffineApproximator {
   std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
   interval_building::ThetaTIndexLists theta_t_index_lists_;
+  // Nodes the theta lists carry that no earlier layer can reach; see the
+  // constructor and getBorderConditions.
+  int unreachable_nodes_ = 0;
+  int checked_nodes_ = 0;
 
   // Border conditions at switching instants. Held by value: CourierBorderSolver
   // keeps its prepared tables behind a shared_ptr precisely so that this class

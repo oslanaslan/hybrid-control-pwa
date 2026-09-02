@@ -1817,6 +1817,12 @@ std::vector<double> CourierBorderSolver::solve(
       // multiplier lambda_A (x) lambda_B (x) lambda_C, and it cuts off exactly
       // the same zeta*.
       SparseVec row;
+      // The largest magnitude that enters the two sums below, and how many
+      // terms each carries. sep is a difference of two numbers built from
+      // these, so this is what bounds its rounding error -- see the noise
+      // floor computed at the separation check.
+      double sep_operand = 0.0;
+      long long sep_terms = 0;
       for (int b = 0; b < kBlockCount; ++b) {
         const auto& verts = data.block_vertices[static_cast<std::size_t>(b)][
             static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
@@ -1828,6 +1834,8 @@ std::vector<double> CourierBorderSolver::solve(
           const SparseVec phi = buildPhiRowBlock(
               tgt_geom, tgt_lay, b, js[static_cast<std::size_t>(b)], verts[i],
               kEps);
+          sep_operand = std::max(sep_operand, std::abs(weight * phi.dot(z)));
+          ++sep_terms;
           for (std::size_t k = 0; k < phi.cols.size(); ++k) {
             row.add(phi.cols[k], weight * phi.vals[k], kGeomEps);
           }
@@ -1850,8 +1858,12 @@ std::vector<double> CourierBorderSolver::solve(
 
       double rhs = 0.0;
       for (std::size_t i = 0; i < sub.group2.size(); ++i) {
-        rhs += sub.mu[i]
-               * targetValue(j, sub.group2[i].first, sub.group2[i].second);
+        const double term
+            = sub.mu[i]
+              * targetValue(j, sub.group2[i].first, sub.group2[i].second);
+        sep_operand = std::max(sep_operand, std::abs(term));
+        ++sep_terms;
+        rhs += term;
       }
 
       // A cut that does not separate the current point means the multipliers
@@ -1879,7 +1891,38 @@ std::vector<double> CourierBorderSolver::solve(
       // sits two orders above that floor, so a region reaching this point
       // normally clears the gate with room to spare.
       const double sep = sigma * (row.dot(z) - rhs);
-      if (sub.zeta > 10.0 * kHighsSolutionTol && sep < 0.5 * sub.zeta) {
+      // What sep can actually resolve. It is a difference of two sums whose
+      // individual terms reach sep_operand -- the value function at a region
+      // vertex, which grows with the switch count and reached 1.3e+11 by
+      // level 4 -- while the difference itself is of order zeta. Every term
+      // carries a relative rounding of one ulp, so the absolute error of sep
+      // is about sep_terms * eps * sep_operand, and below that sep is noise.
+      //
+      // Measured, not assumed: at level 3 the reconstruction produced
+      // row^T z = -102477.04645945548 against rhs = -102477.04645955111,
+      // agreeing to thirteen digits where they should have differed by a zeta
+      // of 0.0502 -- and eight consecutive cases put zeta between 1e-7 and
+      // 1e-6 of |row^T z|. The primal difference sum_b t_b - sum_s d_s
+      // reproduced zeta to nine digits in every one of them, so zeta is sound
+      // and it is sep that cannot be computed this finely.
+      const double sep_noise
+          = static_cast<double>(sep_terms)
+            * std::numeric_limits<double>::epsilon() * sep_operand;
+      // Demanding separation below that floor does not protect anything: it
+      // discards cuts on the strength of digits the arithmetic never had. That
+      // is what stalled the run at switch count 5 -- twenty-six consecutive
+      // iterations dropping twenty-two cuts each and returning the same four
+      // violations, until the iteration cap threw.
+      //
+      // Keeping such a cut cannot cost soundness. The master only proposes z;
+      // every proposal is certified against the exact subproblems by a full
+      // clean pass before solve() returns, and that gate is untouched. A cut
+      // built from imperfect multipliers can only make the master's proposal
+      // worse, never make an uncertified vector acceptable. What the check
+      // guards is the strength of the cut -- tightness -- not validity.
+      if (sub.zeta > 10.0 * kHighsSolutionTol
+          && sub.zeta > 4.0 * sep_noise
+          && sep < 0.5 * sub.zeta) {
         ++non_separating_cuts;
         if (non_separating_cuts == 1) {
           // The full picture, once per node. Reproducing this state costs
@@ -1916,13 +1959,15 @@ std::vector<double> CourierBorderSolver::solve(
               "courier sweep: cut does not separate z*, separation {} vs zeta "
               "{}; block cells ({}, {}, {}), ladder rung {}. "
               "row^T z {}, rhs {}, sigma {}. "
+              "sep noise floor {} over {} terms of size {}. "
               "primal: sum_b t_b {}, sum_s d_s {}, difference {} (zeta column "
               "{}). duals: kappa {}, lambda masses ({}, {}, {}), mu mass {} "
               "over {} group-2 rows and {} group-1 rows. "
               "Dropping the cut and continuing; further occurrences are "
               "counted, not logged.",
               sep, sub.zeta, js[0], js[1], js[2], sub.rung, row.dot(z), rhs,
-              sigma, sum_t, sum_d, sum_t - sum_d, sub.zeta, sub.kappa,
+              sigma, sep_noise, sep_terms, sep_operand,
+              sum_t, sum_d, sum_t - sum_d, sub.zeta, sub.kappa,
               lambda_mass[0], lambda_mass[1], lambda_mass[2], mu_mass,
               sub.group2_rows, sub.group1_rows);
         }

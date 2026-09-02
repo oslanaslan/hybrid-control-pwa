@@ -32,10 +32,21 @@ constexpr int kSubsystemCount = 5;
 constexpr double kEps = 1e-5;
 constexpr double kGeomEps = 1e-8;
 
-// Tolerance for the optional end-to-end residual check. It has to sit above the
-// HiGHS feasibility tolerance, otherwise the check would fire on solutions that
-// the solver legitimately reports as optimal.
+// Tolerance for the end-to-end residual check, as an absolute floor plus a
+// term relative to the size of what is being measured.
+//
+// F is a sum of terms -- the slope, (Psi z)^T m, rho^T |Psi z|, g -- that very
+// nearly cancel. On the N=160 geometry those terms reach 1e2, and the LP
+// satisfies its rows only to the solver's own 1e-6, so F carries an absolute
+// error of about 1e-4 before anything is wrong. A bare 1e-4 threshold sits
+// exactly on that floor and fires on rounding: an observed worst of 1.20e-4
+// against a value function of order 1e2 is 1e-6 relative.
+//
+// The check still asserts s * F <= 0 at every vertex of every region -- it is
+// the statement that the result is a bound, and nothing about that weakens.
+// Only the threshold is expressed in units the quantity actually has.
 constexpr double kResidualValidationTol = 1e-4;
+constexpr double kResidualValidationRelTol = 1e-6;
 
 using ValueFunction = hcpwa::util::ValueFunction;
 

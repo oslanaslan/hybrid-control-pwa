@@ -584,6 +584,7 @@ WorstResidual worstReducedResidual(const ReducedLpInput& input,
   for (const ReducedLpBlock& block : input.blocks) {
     double best_left = -kInf;
     double best_right = -kInf;
+    double best_scale = 0.0;
     for (const BlockRegionData& region : block.regions) {
       const Eigen::VectorXd q_left = psiTimes(region, z);
       const Eigen::VectorXd q_right = psiTimes(region, x_next);
@@ -598,12 +599,19 @@ WorstResidual worstReducedResidual(const ReducedLpInput& input,
                                + vertex.g;
         best_left = std::max(best_left, s * f_left);
         best_right = std::max(best_right, s * f_right);
+        // The terms F is assembled from, before they cancel.
+        best_scale = std::max(
+            {best_scale, std::abs(slope), std::abs(q_left.dot(vertex.m)),
+             std::abs(q_right.dot(vertex.m)),
+             vertex.rho.dot(q_left.cwiseAbs()),
+             vertex.rho.dot(q_right.cwiseAbs()), std::abs(vertex.g)});
       }
     }
     // Lemma 3: the maximum of a separable function over a product is the sum of
     // the per-factor maxima, so this is the exact global worst case.
     out.left += best_left;
     out.right += best_right;
+    out.scale += best_scale;
   }
   return out;
 }

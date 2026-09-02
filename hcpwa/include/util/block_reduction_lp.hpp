@@ -213,6 +213,12 @@ std::vector<double> updateReducedLpRowUpper(
 struct WorstResidual {
   double left = 0.0;
   double right = 0.0;
+  // Largest magnitude of any single term that went into the residual, summed
+  // over blocks the same way the residual is. F is a sum of terms of this size
+  // that very nearly cancel, so it can only be trusted to about
+  // scale * (the solver's own tolerance) -- an absolute threshold below that
+  // measures rounding, not soundness.
+  double scale = 0.0;
   double worst() const { return left > right ? left : right; }
 };
 

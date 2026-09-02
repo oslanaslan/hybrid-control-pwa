@@ -634,6 +634,9 @@ TEST(barycentric_block_reduction, worst_residual_matches_brute_force) {
     const br::WorstResidual slow = bruteForceWorst(input, x_next, z);
     EXPECT_NEAR(fast.left, slow.left, 1e-9) << "s=" << s;
     EXPECT_NEAR(fast.right, slow.right, 1e-9) << "s=" << s;
+    // The scale is the size of the terms F cancels between, so it must be at
+    // least as large as F itself.
+    EXPECT_GE(fast.scale, std::abs(fast.worst())) << "s=" << s;
     // And the solution really is a bound.
     EXPECT_LE(fast.worst(), 1e-7) << "s=" << s;
   }

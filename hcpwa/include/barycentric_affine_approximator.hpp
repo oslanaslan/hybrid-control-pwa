@@ -134,6 +134,13 @@ class BarycentricAffineApproximator {
   std::array<block_reduction::ReducedLpInput, kPhases> reduced_inputs_;
   std::array<block_reduction::ReducedLpColLayout, kPhases> reduced_cols_;
   std::array<block_reduction::ReducedLpRowLayout, kPhases> reduced_rows_;
+  // Positive factor the cost vector handed to HiGHS was divided by. Scaling a
+  // linear objective by a positive constant is an exact reformulation -- same
+  // feasible set, same optimal face -- but it matters here because HiGHS tests
+  // dual feasibility with an absolute tolerance on the reduced costs, and the
+  // R/R_b weights make raw costs reach 1e+06. Multiply reported objective
+  // values by it to read them back in the original units.
+  std::array<double, kPhases> objective_scales_{1.0, 1.0};
 
   std::shared_ptr<spdlog::logger> logger_;
   std::vector<std::unique_ptr<Highs>> highs_solvers_;

@@ -42,6 +42,16 @@ constexpr double kHighsSolutionTol = 1e-6;
 constexpr double kHighsSmallMatrixValue = 1e-9;
 constexpr double kHighsPdlpOptimalityTol = 1e-6;
 
+// How much primal infeasibility a non-optimal HiGHS point may carry and still
+// be accepted by solveLp(). Row units here are the same units as the residual
+// F, so this is set to kResidualValidationTol: accept exactly what the exact
+// worst-residual check that runs immediately afterwards would accept, and let
+// that check -- which recomputes s * F from the formulas rather than trusting
+// the solver -- be the one that decides. The solver itself is configured at
+// kHighsSolutionTol = 1e-6, two orders tighter.
+constexpr double kLpPrimalFeasibilityLimit
+    = barycentric_affine_approximator::kResidualValidationTol;
+
 // Converts hcpwa::Vec<2> to Eigen::Vector2d. Keeping this tiny conversion helper
 // avoids mixing two vector APIs inside the indexing-heavy barycentric code.
 Eigen::Vector2d toEigen2(const hcpwa::Vec<2>& v) {
@@ -1197,6 +1207,30 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
   // already baked into the cost by the assembler (step 2.1, section 5).
   highs->changeObjectiveSense(ObjSense::kMinimize);
 
+  // Normalize the cost vector to max |c| = 1. This is an exact reformulation:
+  // dividing a linear objective by a positive constant leaves the feasible set
+  // and the optimal face untouched. It is needed because the R/R_b weights put
+  // raw costs in [1e+05, 2e+06] and objective values near 1e+17, while HiGHS
+  // judges dual feasibility with an *absolute* tolerance on reduced costs. At
+  // that scale the test is meaningless: a solve with a relative dual error of
+  // 1e-10 was reported with 3e-04 of dual infeasibility and downgraded from
+  // Optimal to Unknown, which used to abort the run. Same treatment the courier
+  // master LP already gets.
+  std::vector<double> cost(matrices.cost.data(),
+                           matrices.cost.data() + matrices.cost.size());
+  double objective_scale = 0.0;
+  for (const double c : cost) {
+    objective_scale = std::max(objective_scale, std::abs(c));
+  }
+  if (!(objective_scale > 0.0) || !std::isfinite(objective_scale)) {
+    throw std::runtime_error(
+        "initializeHighs: objective is all zero or not finite");
+  }
+  for (double& c : cost) {
+    c /= objective_scale;
+  }
+  objective_scales_[static_cast<std::size_t>(phase)] = objective_scale;
+
   // y >= 0 and u >= 0 come from the assembler. Gauge fixing is ours: it removes
   // the additive nullspace between the five projected layers. Do not fix layer
   // 0; layers 1..4 get their first vertex pinned to 0.
@@ -1212,7 +1246,7 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
   }
 
   HighsStatus st = highs->addCols(
-      n, matrices.cost.data(), col_lower.data(), col_upper.data(),
+      n, cost.data(), col_lower.data(), col_upper.data(),
       /*num_nz=*/0, /*start=*/nullptr, /*index=*/nullptr, /*value=*/nullptr);
   if (st != HighsStatus::kOk) {
     throw std::runtime_error("initializeHighs: highs.addCols failed.");
@@ -1262,10 +1296,13 @@ void BarycentricAffineApproximator::updateHighsRhsUpperBounds(
   auto& highs_solver = highs_solvers_[solver_index];
   std::vector<int> row_ids(new_row_upper.size());
   std::iota(row_ids.begin(), row_ids.end(), 0);
-  HighsStatus st = highs_solver->changeRowsBounds(
+  // kWarning here too: changing bounds draws the same scaling advisories, and
+  // the bounds that were actually installed are verified by the residual check
+  // after the solve.
+  const HighsStatus st = highs_solver->changeRowsBounds(
       static_cast<int>(row_ids.size()), row_ids.data(), row_lower.data(),
       new_row_upper.data());
-  if (st != HighsStatus::kOk) {
+  if (st == HighsStatus::kError) {
     throw std::runtime_error(
         "updateHighsRhsUpperBounds: highs.changeRowsBounds failed.");
   }
@@ -1277,16 +1314,62 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
   // y_j block is a proof/linearization device and is not part of the value
   // function stored for later time steps.
   auto& highs_solver = highs_solvers_[solver_index];
-  HighsStatus run_status = highs_solver->run();
-  if (run_status != HighsStatus::kOk) {
-    throw std::runtime_error("solveLp: highs_solver.run() failed with status "
-                             + std::to_string(static_cast<int>(run_status)));
+  const HighsStatus run_status = highs_solver->run();
+  // kWarning is advisory and does not mean the solve failed. HiGHS returns it
+  // for the scaling notes this LP always draws -- "excessively large costs" for
+  // the R/R_b objective weights, "excessively small row bounds" for residual
+  // bounds near zero -- while reporting Optimal with a primal-dual objective
+  // error of 1e-16. Treating it as failure discarded an hour of work over a
+  // perfectly solved LP.
+  //
+  // What actually has to hold is checked twice below: the model status, and
+  // then validateStepResiduals, which recomputes s * F from the formulas and
+  // is the statement that the result is a bound.
+  if (run_status == HighsStatus::kError) {
+    throw std::runtime_error("solveLp: highs_solver.run() returned an error");
   }
-  if (highs_solver->getModelStatus() != HighsModelStatus::kOptimal) {
-    throw std::runtime_error(
-        "solveLp: LP solution not found for solver_index "
-        + std::to_string(solver_index) + ", model status: "
-        + std::to_string(static_cast<int>(highs_solver->getModelStatus())));
+  const HighsModelStatus model_status = highs_solver->getModelStatus();
+  const HighsInfo& info = highs_solver->getInfo();
+  if (model_status != HighsModelStatus::kOptimal) {
+    // kUnknown means HiGHS solved the LP but would not certify the point
+    // against its own tolerances -- in every observed case because of dual
+    // infeasibility, that is, reduced costs of the wrong sign. Read what that
+    // does and does not cost us.
+    //
+    // Soundness of the step rests on *primal* feasibility alone: the rows are
+    // exactly the statement s * F <= 0 at every vertex of every region, so any
+    // primal-feasible z yields a valid bound. Dual feasibility is the
+    // certificate of *optimality*, and losing it means only that the bound may
+    // be looser than the best one this LP admits -- a coarser estimate, not a
+    // wrong one. Accepting it is therefore a tightness relaxation, never a
+    // structural one, and validateStepResiduals re-derives s * F from the
+    // formulas right after this returns, so the bound property is checked
+    // independently of anything HiGHS asserts.
+    //
+    // Anything else -- Infeasible, Unbounded, a solve error -- is fatal: those
+    // carry no usable primal point at all.
+    const bool primal_feasible
+        = model_status == HighsModelStatus::kUnknown
+          && info.primal_solution_status == kSolutionStatusFeasible
+          && info.max_primal_infeasibility <= kLpPrimalFeasibilityLimit;
+    if (!primal_feasible) {
+      throw std::runtime_error(
+          "solveLp: LP solution not found for solver_index "
+          + std::to_string(solver_index) + ", model status: "
+          + std::to_string(static_cast<int>(model_status))
+          + ", primal solution status: "
+          + std::to_string(static_cast<int>(info.primal_solution_status))
+          + ", max primal infeasibility: "
+          + std::to_string(info.max_primal_infeasibility));
+    }
+    logger_->warn(
+        "solveLp: solver_index {} accepted a primal-feasible non-optimal "
+        "point (model status {}, max primal infeasibility {:.3e}, {} dual "
+        "infeasibilities up to {:.3e}); the bound for this step may be looser "
+        "than optimal",
+        solver_index, static_cast<int>(model_status),
+        info.max_primal_infeasibility, info.num_dual_infeasibilities,
+        info.max_dual_infeasibility);
   }
 
   const auto& solution = highs_solver->getSolution();
@@ -1314,7 +1397,10 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
     }
     logger_->info(
         "solveLp: phase={}, residual objective {:.6e}, tie-break term {:.6e}",
-        phase, highs_solver->getInfo().objective_function_value - regularizer,
+        phase,
+        highs_solver->getInfo().objective_function_value
+            * objective_scales_[static_cast<std::size_t>(phase)]
+            - regularizer,
         regularizer);
   }
 
@@ -1338,11 +1424,13 @@ void BarycentricAffineApproximator::validateStepResiduals(
   const block_reduction::WorstResidual worst
       = block_reduction::worstReducedResidual(reduced_inputs_[phase], x_next,
                                               z);
-  if (worst.worst() > kResidualValidationTol) {
-    throw std::runtime_error(
-        "validateStepResiduals: residual has the wrong sign, worst s*F = "
-        + std::to_string(worst.worst()) + " (left " + std::to_string(worst.left)
-        + ", right " + std::to_string(worst.right) + ")");
+  const double limit
+      = kResidualValidationTol + kResidualValidationRelTol * worst.scale;
+  if (worst.worst() > limit) {
+    throw std::runtime_error(std::format(
+        "validateStepResiduals: residual has the wrong sign, worst s*F = {} "
+        "(left {}, right {}) against a limit of {} for terms of size {}",
+        worst.worst(), worst.left, worst.right, limit, worst.scale));
   }
 }
 

@@ -473,7 +473,10 @@ std::tuple<std::vector<Eigen::MatrixXd>,  // A_j_matrs_lst
            std::vector<double>            // g_j_scals_lst
            >
 GlobalAffineApproximator::precomputeSystemMatrices(int phase) {
-  auto intersection_points_phase = intersection_points_[phase];
+  // By reference: this is a vector of per-region vertex lists, tens of
+  // millions of heap-allocated Eigen vectors, and the only thing read from it
+  // here is its size.
+  const auto& intersection_points_phase = intersection_points_[phase];
   int n_areas = intersection_points_phase.size();
   std::vector<Eigen::MatrixXd> A_j_matrs_lst;
   std::vector<Eigen::VectorXd> f_j_vecs_lst;

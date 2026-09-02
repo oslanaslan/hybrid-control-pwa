@@ -208,13 +208,16 @@ RhoClampStats clampBlockRho(ReducedLpInput& input, double tolerance) {
             ++stats.negatives_clamped;
           } else if (vertex.rho(p) > 0.0
                      && vertex.rho(p) <= kSmallMatrixValue) {
-            // rho(nu) is affine with coefficients of order 1e-1 to 1e1, so a
-            // value this small means nu is on the line where the two flow
-            // bounds meet and the true radius is zero. Snap it: leaving it in
-            // would let HiGHS drop the entry silently, which is the one thing
-            // the assembler refuses to allow.
-            vertex.rho(p) = 0.0;
-            ++stats.tiny_snapped;
+            // Such a radius means nu sits on the line where the two flow
+            // bounds meet and the true value is zero -- but it is raised, not
+            // zeroed. rho enters row (L) with a plus sign, so a larger radius
+            // only ever tightens the row: rounding up is sound whatever the
+            // true value was, while rounding down would relax a constraint
+            // that worstReducedResidual, reading this same clamped input,
+            // could not then see. Leaving it as it stands is not an option
+            // either, because HiGHS would drop it silently.
+            vertex.rho(p) = 2.0 * kSmallMatrixValue;
+            ++stats.tiny_raised;
           }
         }
       }

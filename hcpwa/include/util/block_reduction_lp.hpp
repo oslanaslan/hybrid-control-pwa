@@ -29,10 +29,14 @@
 namespace barycentric_affine_approximator {
 namespace block_reduction {
 
-// Pruning threshold used while a row is being built. It is far below the HiGHS
-// small_matrix_value so that nothing is dropped here that HiGHS would have
-// kept; the point of pruning at all is to keep the sparse rows short.
-constexpr double kAssembleEps = 1e-12;
+// Pruning threshold used while a row is being built. It is exactly the HiGHS
+// small_matrix_value, so the row this file assembles is the row HiGHS solves:
+// anything smaller would be emitted here and then dropped by the solver, and
+// the per-step RHS update and the residual check -- which read these same rows
+// -- would be reasoning about a model that no longer exists. rho is the one
+// coefficient that must never be dropped at all, and it is guarded separately
+// in assembleReducedLp().
+constexpr double kAssembleEps = 1e-9;
 
 // Mirrors the HiGHS "small_matrix_value" option. HiGHS silently drops matrix
 // entries at or below it, which for a rho coefficient would *weaken* row (L)
@@ -40,9 +44,17 @@ constexpr double kAssembleEps = 1e-12;
 // this value.
 constexpr double kSmallMatrixValue = 1e-9;
 
-// Residual row upper bounds this close to zero are snapped to zero, matching
-// the behaviour the product assembler has always had.
-constexpr double kRhsSnapEps = kEps;
+// Residual row upper bounds this close to zero are snapped to zero, so that a
+// bound of order 1e-14 does not sit in a matrix whose other entries are of
+// order 1e2.
+//
+// NOT kEps, although the product assembler used that: its rows carried a dt
+// factor, so 1e-5 there was 1e-5/dt of residual, and these rows are on plain F.
+// A product constraint is now the sum of three block rows coupled through
+// sum_b mu_b <= 0, so up to three snaps stack on one constraint -- at 1e-5 that
+// would be 3e-5 of admitted violation, a third of kResidualValidationTol, for
+// no benefit.
+constexpr double kRhsSnapEps = 1e-12;
 
 // One vertex of one block-region: everything the two residual rows need.
 struct BlockVertexData {
@@ -75,7 +87,7 @@ struct ReducedLpBlock {
 enum class ObjectiveWeights {
   // w_b = R / R_b with R = prod_b R_b. Reproduces the product objective
   // coefficient for coefficient, and keeps the LP bounded: under a gauge shift
-  // of block b the objective moves by -(1/dt) * w_b * R_b * theta_b, and with
+  // of block b the objective moves by (s/dt) * w_b * R_b * theta_b, and with
   // these weights w_b * R_b = R for *every* block, so the shift is bounded by
   // the same feasibility row that bounds the shift itself.
   ProductCount,
@@ -170,12 +182,13 @@ struct ReducedLpMatrices {
 struct RhoClampStats {
   // Small negatives, which are numerical noise around an exact zero radius.
   int negatives_clamped = 0;
-  // Magnitudes at or below kSmallMatrixValue, snapped to exactly zero. rho is
-  // affine in nu with coefficients of order 1e-1 to 1e1, so a magnitude that
-  // small means the vertex sits on the branch line where the two bounds
-  // coincide and the radius is exactly zero. Snapping is what keeps HiGHS from
-  // dropping the entry silently instead.
-  int tiny_snapped = 0;
+  // Magnitudes at or below kSmallMatrixValue, raised just above it. Such a
+  // vertex sits on the branch line where the two flow bounds coincide and the
+  // true radius is zero, but rho enters row (L) with a plus sign, so rounding
+  // up only tightens and is sound whatever the true value was. Leaving it
+  // alone is not: HiGHS would drop the entry, and a dropped rho relaxes the
+  // row.
+  int tiny_raised = 0;
 };
 
 // Normalises the disturbance radii. Call this once on the input: the row

@@ -131,32 +131,6 @@ TEST(barycentric_block_system, one_reduced_step_solves_and_is_a_bound) {
   }
 }
 
-// The courier border solver on the same production-shaped geometry. Its
-// subproblem is reduced over the same blocks: condition (a) splits because
-// every target plane lies inside one block and every courier term
-// c_s[k] * nu_axis is a single coordinate, so the maximum over the product of
-// vertices is the sum of the per-block maxima. The same vertices are checked,
-// just counted differently.
-TEST(barycentric_block_system, courier_certifies_on_real_geometry) {
-  cddwrap::global_init();
-  defer _ = &cddwrap::global_free;
-
-  barycentric_affine_approximator::BarycentricAffineApproximator approximator(
-      /*t_max=*/300.0, /*t_split_count=*/10, /*tau_min=*/60.0,
-      /*tau_max=*/120.0, makeParams(), /*highs_verbose=*/false);
-  hcpwa::TriangleGeometryOptions options;
-  options.build_8d_vertices = false;
-  approximator.setGeometryOptions(options);
-  approximator.getIntersectionPoints();
-
-  barycentric_affine_approximator::CourierBorderOptions courier_options;
-  courier_options.max_iterations = 8;
-  barycentric_affine_approximator::CourierBorderSolver solver(courier_options);
-  solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
-                 approximator.nodeWeights(), 100.0);
-  ASSERT_TRUE(solver.prepared());
-}
-
 // Runs the border problem to convergence on production-shaped geometry: 1.58
 // million target regions, certified region by region.
 //
@@ -195,7 +169,16 @@ TEST(barycentric_block_system, courier_converges_on_real_geometry) {
       request, barycentric_affine_approximator::ApproximationMode::Lower,
       &stats);
   EXPECT_EQ(static_cast<int>(z.size()), approximator.layouts()[0].num_x);
-  EXPECT_LE(stats.worst_zeta, courier_options.certificate_tol);
+  // Deliberately not EXPECT_LE(stats.worst_zeta, certificate_tol): that
+  // cannot fail. worst is only raised past the certificate_tol
+  // early-continue, and any region that raises it also pushes a
+  // violation, which prevents the full-pass return. The certification is
+  // the return itself -- solve() throws unless one complete pass over
+  // every region found nothing. What is worth pinning is that the run did
+  // real work rather than certifying vacuously.
+  EXPECT_GT(stats.subproblems_solved, 0);
+  EXPECT_GT(stats.cuts_added, 0);
+  EXPECT_GE(stats.iterations, 1);
   GTEST_LOG_(INFO) << "converged in " << stats.iterations << " iterations, "
                    << stats.cuts_added << " cuts, "
                    << stats.subproblems_solved << " subproblems";

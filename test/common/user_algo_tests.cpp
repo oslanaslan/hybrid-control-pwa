@@ -366,6 +366,9 @@ TEST(user_algo, area_vertices_are_the_full_product_of_group_cells) {
       hcpwa::CalcPrism(tri, {3, 7}), hcpwa::CalcPrism(tri, {5, 7}), {3, 5, 7});
 
   ASSERT_EQ(result.intersection_points_phase1.size(), 1U);
+  ASSERT_GT(n157, 2U) << "degenerate fixture: the group cell must have more "
+                         "than the 2 vertices the old bound would emit";
+  ASSERT_GT(n468, 2U);
   EXPECT_EQ(result.intersection_points_phase1[0].size(), n157 * n468 * 3)
       << "phase-1 area is not the full product of its two group cells and the "
          "2D simplex";
@@ -451,6 +454,11 @@ TEST(user_algo, polygon_area_vertices_are_the_full_product_of_group_cells) {
                             hcpwa::CalcPrism(res.polygon, {5, 7}), {3, 5, 7});
 
   ASSERT_EQ(result.intersection_points_phase1.size(), 1U);
+  // Without these the phase-1 expectation collapses to 2 * 2 * n_poly, which
+  // is exactly what the truncated loops emitted -- it would pass on the bug.
+  ASSERT_GT(n157, 2U) << "degenerate fixture: the group cell must have more "
+                         "than the 2 vertices the old bound would emit";
+  ASSERT_GT(n468, 2U);
   EXPECT_EQ(result.intersection_points_phase1[0].size(), n157 * n468 * n_poly)
       << "phase-1 area is not the full product of its two group cells and the "
          "2D polygon";

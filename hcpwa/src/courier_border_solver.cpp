@@ -39,6 +39,16 @@ constexpr double kHighsSmallMatrixValue = 1e-9;
 // O(n_max), not by 1e-5.
 constexpr double kDualIdentityTol = 1e-4;
 
+// The mass identities sum one multiplier per row of their family, and each is
+// dual feasible only to kHighsSolutionTol, so the tolerance has to grow with
+// the row count rather than sit at a blanket constant that a larger geometry
+// walks into. The failures these gates exist to catch -- a flipped row sign,
+// an axis assigned to the wrong block -- are off by O(1), so this stays sharp.
+inline double massTol(std::size_t terms) {
+  return std::max(kDualIdentityTol,
+                  kHighsSolutionTol * static_cast<double>(terms));
+}
+
 // Row bounds this close to zero are snapped to zero. They arise as
 // sigma * V_b(nu; z) or sigma * T(g) that happen to land on zero; leaving a
 // 2e-14 bound in a matrix whose other entries are of order 1e2 makes HiGHS warn
@@ -213,7 +223,7 @@ namespace {
 
 using detail::clipTriangleToRect;
 
-// Uniform bucket grid over one projection layer. locateRegions() in the
+// Uniform bucket grid over one projection layer. A linear scan over the
 // approximator is O(#regions) per query, which is unusable at the call counts
 // here; this is O(triangles per bucket).
 struct LayerIndex {
@@ -424,10 +434,11 @@ struct CachedCourier {
 struct SubproblemResult {
   double zeta = 0.0;
   double kappa = 0.0;
-  // The courier itself: c_s[k] at 2*s+k, d_s at s. Kept so that a courier that
-  // certified one region can be re-tested against others without an LP.
+  // The courier's slopes, c_s[k] at 2*s+k. Kept so that a courier that
+  // certified one region can be re-tested against others without an LP; the
+  // offsets d_s are not kept, because the screen rebuilds them from c as
+  // d_hat, which is tighter than whatever the LP happened to return.
   std::array<double, 2 * kSubsystemCount> c{};
-  std::array<double, kSubsystemCount> d{};
   // Per block, one entry per unique vertex of that block's cell.
   std::array<std::vector<double>, kBlockCount> lambda;
   // Per emitted group-2 row, in order, together with its (plane, pool index).
@@ -452,8 +463,22 @@ struct CourierBorderSolver::Impl {
   // so j = (j_A * M_B + j_B) * M_C + j_C.
   int numRegions(int phase) const {
     const auto& blocks = (*geometries)[static_cast<std::size_t>(phase)].blocks;
-    return blocks[0].numRegions() * blocks[1].numRegions()
-           * blocks[2].numRegions();
+    // In 64 bits, then checked. Nothing materialises this product any more, so
+    // the count is computed rather than read from a container's size, and a
+    // wrapped value would reach a modulus and a gcd below: a negative one is
+    // undefined behaviour, and a wrapped positive one silently shortens the
+    // sweep while full_pass still reports that every region was visited.
+    const long long total
+        = static_cast<long long>(blocks[0].numRegions())
+          * blocks[1].numRegions() * blocks[2].numRegions();
+    if (total > std::numeric_limits<int>::max()) {
+      throw std::runtime_error(std::format(
+          "CourierBorderSolver: phase {} has {} regions ({}x{}x{}), more than "
+          "an int can index",
+          phase, total, blocks[0].numRegions(), blocks[1].numRegions(),
+          blocks[2].numRegions()));
+    }
+    return static_cast<int>(total);
   }
 
   std::array<int, kBlockCount> decodeRegion(int phase, int region) const {
@@ -483,8 +508,18 @@ struct CourierBorderSolver::Impl {
     for (int l = 0; l < bg.layer_count; ++l) {
       const int s = bg.layer_ids[static_cast<std::size_t>(l)];
       const ProjectionLayer& layer = geom.layers[static_cast<std::size_t>(s)];
-      const TriangleBasis& basis = layer.bases[static_cast<std::size_t>(
-          tri_ids[static_cast<std::size_t>(l)])];
+      const int triangle_id = tri_ids[static_cast<std::size_t>(l)];
+      // Block triangle ids are prism indices copied straight through
+      // packBlockRegions, never validated at ingest; buildReducedLpInput and
+      // addLayerPhi both check here, and this is the hot path that feeds every
+      // courier certificate.
+      if (triangle_id < 0
+          || triangle_id >= static_cast<int>(layer.bases.size())) {
+        throw std::runtime_error(
+            "CourierBorderSolver: block triangle id out of range");
+      }
+      const TriangleBasis& basis
+          = layer.bases[static_cast<std::size_t>(triangle_id)];
       const auto& local = bg.local_axis[static_cast<std::size_t>(l)];
       const Eigen::Vector3d a
           = basis.H * Eigen::Vector2d(nu(local[0]), nu(local[1])) + basis.h;
@@ -511,10 +546,9 @@ struct CourierBorderSolver::Impl {
   // what remains per region is an argmax over sums of five table lookups.
   std::vector<int> chooseCandidates(
       int tgt, int src, const TargetData& data,
-      std::span<const std::vector<double>> candidates) const {
+      std::span<const std::vector<double>> candidates,
+      long long* unlocated_out) const {
     const auto n_cand = static_cast<int>(candidates.size());
-    const PhaseGeometry& tgt_geom
-        = (*geometries)[static_cast<std::size_t>(tgt)];
     const PhaseGeometry& src_geom
         = (*geometries)[static_cast<std::size_t>(src)];
     const BarycentricVarLayout& src_lay
@@ -570,6 +604,7 @@ struct CourierBorderSolver::Impl {
     const int n_regions = numRegions(tgt);
     std::vector<int> out(static_cast<std::size_t>(n_regions), 0);
     std::vector<double> total(static_cast<std::size_t>(n_cand));
+    long long unlocated = 0;
     for (int j = 0; j < n_regions; ++j) {
       const std::array<int, kBlockCount> js = decodeRegion(tgt, j);
       std::fill(total.begin(), total.end(), 0.0);
@@ -598,9 +633,19 @@ struct CourierBorderSolver::Impl {
           best = c;
         }
       }
+      if (!std::isfinite(best_value)) {
+        // Some source plane could not locate this region's centroid, so no
+        // candidate has a value and `best` is 0 by default rather than by
+        // choice. Sound -- any rho gives a valid courier -- but it means the
+        // tightest candidate was not chosen, and silently falling back was
+        // also what the pre-block code did. Counted so it stops being silent.
+        ++unlocated;
+      }
       out[static_cast<std::size_t>(j)] = best;
     }
-    (void)tgt_geom;
+    if (unlocated_out != nullptr) {
+      *unlocated_out = unlocated;
+    }
     return out;
   }
 
@@ -738,9 +783,23 @@ SubproblemResult solveRegionSubproblem(
   sclo[static_cast<std::size_t>(kSubZetaCol)] = 0.0;
 
   // Ladder for the subproblem: serial dual, then primal, then presolve on.
-  static constexpr std::array<SimplexAttempt, 3> kSubLadder
+  //
+  // The last rung is only offered when the caller does not need duals. HiGHS
+  // presolve removes forcing and duplicate rows and postsolve then *recovers*
+  // the multipliers rather than observing them, and the Benders cut is built
+  // straight out of ssol.row_dual indexed against the original row order. A
+  // recovered multiplier that still passes the stationarity identities can
+  // produce a cut that removes part of the true feasible set, which would
+  // surface only as the generic "not certified" throw. Failing honestly on the
+  // second rung is the better outcome.
+  static constexpr std::array<SimplexAttempt, 3> kSubLadderNoDuals
       = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4},
          SimplexAttempt{true, 0}};
+  static constexpr std::array<SimplexAttempt, 2> kSubLadderDuals
+      = {SimplexAttempt{false, 1}, SimplexAttempt{false, 4}};
+  const std::span<const SimplexAttempt> kSubLadder
+      = want_duals ? std::span<const SimplexAttempt>(kSubLadderDuals)
+                   : std::span<const SimplexAttempt>(kSubLadderNoDuals);
 
   Highs sub;
   HighsStatus run_status = HighsStatus::kError;
@@ -777,8 +836,6 @@ SubproblemResult solveRegionSubproblem(
       out.c[static_cast<std::size_t>(2 * s2 + k)]
           = ssol.col_value[static_cast<std::size_t>(3 * s2 + k)];
     }
-    out.d[static_cast<std::size_t>(s2)]
-        = ssol.col_value[static_cast<std::size_t>(3 * s2 + 2)];
   }
   if (!want_duals) {
     return out;
@@ -1127,33 +1184,27 @@ std::vector<double> CourierBorderSolver::solve(
   // Lower picks one candidate per region. Any choice is sound, so this is
   // purely about tightness; the centroid rule costs O(|P|) per region, whereas
   // "argmax over rho of the min over vertices" would cost O(|V_j| * |P| * 15).
-  // The centroid of a region is the concatenation of its block centroids: the
-  // region is a product, so the mean of each coordinate is the mean over that
-  // block's own vertices. Nothing 8-dimensional is stored for it.
-  auto regionCentroid = [&](const std::array<int, kBlockCount>& js) {
-    Eigen::VectorXd centroid = Eigen::VectorXd::Zero(kSpaceDim);
-    for (int b = 0; b < kBlockCount; ++b) {
-      const BlockGeometry& bg = tgt_geom.blocks[static_cast<std::size_t>(b)];
-      const Eigen::VectorXd& block_centroid
-          = data.block_centroid[static_cast<std::size_t>(b)][
-              static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
-      for (int c = 0; c < bg.coord_count; ++c) {
-        centroid(bg.coords[static_cast<std::size_t>(c)]) = block_centroid(c);
-      }
-    }
-    return centroid;
-  };
-
   std::vector<int> rho_of_region;
   if (!is_upper) {
     const auto rho_started_at = std::chrono::steady_clock::now();
-    rho_of_region = impl.chooseCandidates(tgt, src, data, request.candidates);
+    long long unlocated = 0;
+    rho_of_region = impl.chooseCandidates(tgt, src, data, request.candidates,
+                                          &unlocated);
     logger_->info(
         "courier rho selection: {} regions x {} candidates in {:.1f}s",
         n_regions, n_cand,
         std::chrono::duration<double>(std::chrono::steady_clock::now()
                                       - rho_started_at)
             .count());
+    if (unlocated > 0) {
+      // Sound -- any rho yields a valid courier -- but those regions got
+      // candidate 0 by default rather than by choice, which costs tightness
+      // and, before the block form, would have been just as silent.
+      logger_->warn(
+          "courier rho selection: {} of {} region centroids could not be "
+          "located on some source plane and fell back to candidate 0",
+          unlocated, n_regions);
+    }
   }
 
   // Target value T_j^(s)(g) for one region and one source plane.
@@ -1633,7 +1684,8 @@ std::vector<double> CourierBorderSolver::solve(
           }
           mass += v;
         }
-        if (std::abs(mass - 1.0) > kDualIdentityTol) {
+        if (std::abs(mass - 1.0)
+            > massTol(sub.lambda[static_cast<std::size_t>(b)].size())) {
           throw std::runtime_error(
               "CourierBorderSolver::solve: lambda mass of block "
               + std::to_string(b) + " is " + std::to_string(mass)
@@ -1651,7 +1703,7 @@ std::vector<double> CourierBorderSolver::solve(
       }
       for (int s = 0; s < kSubsystemCount; ++s) {
         if (std::abs(mu_sum[static_cast<std::size_t>(s)] - 1.0)
-            > kDualIdentityTol) {
+            > massTol(sub.group2.size())) {
           throw std::runtime_error(
               "CourierBorderSolver::solve: mu mass of plane "
               + std::to_string(s) + " is "
@@ -1810,6 +1862,21 @@ double CourierBorderSolver::worstCertificateResidual(
     throw std::runtime_error(
         "CourierBorderSolver::worstCertificateResidual: prepare() not called");
   }
+  // The same request validation solve() performs. This is the path
+  // setValidate(true) routes through, so a malformed request must fail here
+  // rather than sail past: an empty candidate span would make Upper mode's
+  // max over an empty range return -infinity and report every region
+  // certified.
+  if (request.target_phase < 0 || request.target_phase >= kPhases
+      || request.source_phase < 0 || request.source_phase >= kPhases
+      || request.target_phase == request.source_phase) {
+    throw std::invalid_argument(
+        "CourierBorderSolver::worstCertificateResidual: invalid phases");
+  }
+  if (request.candidates.empty()) {
+    throw std::invalid_argument(
+        "CourierBorderSolver::worstCertificateResidual: no candidates");
+  }
   // Rebuild each region's courier from scratch against the given z and report
   // the worst phase-I objective. Zero means every region is certified.
   const Impl& impl = *impl_;
@@ -1825,7 +1892,7 @@ double CourierBorderSolver::worstCertificateResidual(
   std::vector<int> rho_of_region;
   if (!is_upper) {
     rho_of_region = impl.chooseCandidates(tgt, request.source_phase, data,
-                                          request.candidates);
+                                          request.candidates, nullptr);
   }
 
   double worst = 0.0;

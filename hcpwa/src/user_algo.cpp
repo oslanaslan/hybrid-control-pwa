@@ -1491,11 +1491,15 @@ TriangleAreasVerticesResult compute_triangle_areas_vertices(
   result.triangles84 = polygons84;
   result.triangles86 = polygons86;
   result.triangles23 = polygons23;
-  // Intersection points and indices
-  result.intersection_points_phase0 = intersection_points_phase0;
-  result.intersection_prism_indices_phase0 = intersection_prism_indices_phase0;
-  result.intersection_points_phase1 = intersection_points_phase1;
-  result.intersection_prism_indices_phase1 = intersection_prism_indices_phase1;
+  // Intersection points and indices. Moved, not copied, for the same reason
+  // the polygon path moves them: intersection_result is dead after this, and
+  // the prism index lists alone are one vector per region.
+  result.intersection_points_phase0 = std::move(intersection_points_phase0);
+  result.intersection_prism_indices_phase0
+      = std::move(intersection_prism_indices_phase0);
+  result.intersection_points_phase1 = std::move(intersection_points_phase1);
+  result.intersection_prism_indices_phase1
+      = std::move(intersection_prism_indices_phase1);
   result.blocks_phase0 = std::move(intersection_result.blocks_phase0);
   result.blocks_phase1 = std::move(intersection_result.blocks_phase1);
 

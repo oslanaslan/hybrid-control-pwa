@@ -354,6 +354,57 @@ TEST(courier_border_lp, generates_cuts_and_still_certifies) {
             0.0);
 }
 
+// The certificate screen decides whether a region is certified by an LP or
+// skipped, so a bug in it -- a wrong block-cell tuple, a wrong rho, a stale
+// t_hat after z moves -- would mark violated regions as covered and return an
+// uncertified z that run() writes straight into the value function. Nothing
+// else exercises it: solve() is the only caller and its result looks the same
+// either way.
+//
+// Running the identical request with the screen off has to give the identical
+// answer, because skipping is supposed to mean "a feasible courier for this
+// region has been exhibited" and nothing else.
+TEST(courier_border_lp, certificate_screen_changes_nothing_but_the_work) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  const Fixture f = makeFixture();
+
+  std::vector<double> a = constantCandidate(f.layouts[1], 2.0);
+  for (int k = 0; k < f.layouts[1].eta_s[0]; ++k) {
+    a[static_cast<std::size_t>(f.layouts[1].idxX(0, k))] += 0.45 * k;
+  }
+  const std::vector<std::vector<double>> cands = {a};
+
+  CourierBorderRequest req;
+  req.target_phase = 0;
+  req.source_phase = 1;
+  req.candidates = cands;
+
+  auto run = [&](int cache_size, CourierBorderStats* stats) {
+    CourierBorderOptions opts;
+    opts.max_seed_rows = 0;
+    opts.max_certificate_cache = cache_size;
+    CourierBorderSolver solver{opts};
+    solver.prepare(f.geometries, f.layouts, f.node_weights, kN);
+    return solver.solve(req, ApproximationMode::Lower, stats);
+  };
+
+  CourierBorderStats screened_stats;
+  CourierBorderStats plain_stats;
+  const std::vector<double> screened = run(64, &screened_stats);
+  const std::vector<double> plain = run(0, &plain_stats);
+
+  ASSERT_EQ(screened.size(), plain.size());
+  for (std::size_t k = 0; k < plain.size(); ++k) {
+    EXPECT_EQ(screened[k], plain[k]) << "node " << k;
+  }
+  // And the screen has to actually be doing something, or the comparison is
+  // between two identical runs.
+  EXPECT_LT(screened_stats.subproblems_solved, plain_stats.subproblems_solved)
+      << "the screen skipped nothing, so this test compared nothing";
+}
+
 // Failure must be loud. run() writes whatever comes back straight into the
 // value function and marches on it, so a partial result would poison the whole
 // backward sweep.

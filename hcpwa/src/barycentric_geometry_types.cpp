@@ -150,6 +150,13 @@ std::array<BlockGeometry, kBlockCount> blockGeometryFromRegions(
       block.triangle_ids.push_back(converted);
     }
 
+    // Checked before the loop below indexes source.aabb[j] by a bound taken
+    // from source.vertices.
+    if (source.aabb.size() != source.vertices.size()) {
+      throw std::runtime_error(
+          "blockGeometryFromRegions: vertex lists and bounding boxes "
+          "disagree");
+    }
     block.vertices.resize(source.vertices.size());
     block.aabb_lower.reserve(source.aabb.size());
     block.aabb_upper.reserve(source.aabb.size());
@@ -195,9 +202,14 @@ std::array<BlockGeometry, kBlockCount> blockGeometryFromRegions(
   }
   for (int b = 0; b < kBlockCount; ++b) {
     const BlockGeometry& block = dst[static_cast<std::size_t>(b)];
-    std::vector<int> coords(block.coords.begin(),
-                            block.coords.begin() + block.coord_count);
-    std::sort(coords.begin(), coords.end());
+    const std::vector<int> coords(block.coords.begin(),
+                                  block.coords.begin() + block.coord_count);
+    // Compared in order, not as a set. A permuted coords -- {0,5,2} for
+    // {0,2,5} -- would otherwise pass everything: converted(c) = vertex[c]
+    // still reads computend's emission order, localAxesForBlock searches
+    // coords and so permutes to match, and validateBlockDecomposition applies
+    // the same scatter on both sides. algo.hpp already documents these as
+    // ascending; this is what enforces it.
     bool found = false;
     for (const auto& expected : expected_blocks) {
       if (expected == coords) {

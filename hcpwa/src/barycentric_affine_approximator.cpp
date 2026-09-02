@@ -954,12 +954,11 @@ void BarycentricAffineApproximator::buildReducedLpInput(int phase) {
   // residual check all read rho exactly as given.
   const block_reduction::RhoClampStats rho_stats
       = block_reduction::clampBlockRho(input, kEps);
-  if (rho_stats.negatives_clamped > 0 || rho_stats.tiny_snapped > 0) {
+  if (rho_stats.negatives_clamped > 0 || rho_stats.tiny_raised > 0) {
     logger_->info(
-        "buildReducedLpInput: phase={}, clamped {} negative and snapped {} "
-        "sub-1e-9 uncertainty radii to zero (vertices sitting on a flow branch "
-        "line)",
-        phase, rho_stats.negatives_clamped, rho_stats.tiny_snapped);
+        "buildReducedLpInput: phase={}, clamped {} negative and raised {} "
+        "sub-1e-9 uncertainty radii (vertices on a flow branch line)",
+        phase, rho_stats.negatives_clamped, rho_stats.tiny_raised);
   }
 
   reduced_inputs_[phase] = std::move(input);
@@ -1024,7 +1023,6 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   }
 
   const std::vector<int> theta_end_ids = admissibleThetaIds(theta);
-  const bool is_upper = approximation_mode_ == ApproximationMode::Upper;
 
   // The family of already computed members, fetched once. Two reasons to hoist
   // it out of the vertex loop instead of refetching per vertex:
@@ -1221,7 +1219,12 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
     throw std::runtime_error("solveLp: HiGHS solution is too short.");
   }
 
-  if (tie_break_eps_ > 0.0) {
+  // The snapshot the column layout was built from, not the live member: the u
+  // block exists only when buildReducedLpInput() saw a positive value, so
+  // reading tie_break_eps_ here would make a later setTieBreakEps() throw out
+  // of idxU from inside a diagnostic.
+  const double tie_break_eps = reduced_inputs_[phase].tie_break_eps;
+  if (tie_break_eps > 0.0) {
     // The two halves of the objective, reported apart: the l1 residual norm is
     // what the method minimizes, and the eps * ||z||_1 term only picks one
     // point out of an optimal face. If the second is not far smaller than the
@@ -1229,7 +1232,7 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
     double regularizer = 0.0;
     const auto& cols = reduced_cols_[phase];
     for (int k = 0; k < num_x; ++k) {
-      regularizer += tie_break_eps_
+      regularizer += tie_break_eps
                      * solution.col_value[static_cast<std::size_t>(
                          cols.idxU(k))];
     }
@@ -1345,7 +1348,16 @@ void BarycentricAffineApproximator::validateBlockDecomposition(
         }
       }
     }
-    if (g_scal_sum != full_ctm.g_scal) {
+    // The one quantity here that is accumulated in a different order by the
+    // two paths: the full call adds the four flow scalars in sequence while
+    // the block sum adds two partial sums, and float addition is not
+    // associative. Everything else compared above is written only by the
+    // flows of its own block, in the same order, so it is bit-exact. What
+    // this check exists to catch -- the two paths resolving different
+    // branches -- is off by O(1), so a relative tolerance keeps all of its
+    // discriminating power.
+    if (std::abs(g_scal_sum - full_ctm.g_scal)
+        > 1e-9 * std::max(1.0, std::abs(full_ctm.g_scal))) {
       throw std::runtime_error(std::format(
           "validateBlockDecomposition: phase {} block g scalars sum to {} "
           "instead of {}", phase, g_scal_sum, full_ctm.g_scal));
@@ -1356,8 +1368,9 @@ void BarycentricAffineApproximator::validateBlockDecomposition(
   // three block centroids reproduces it. The two are not bit-identical -- the
   // 8D mean sums every value |V_b'| |V_b''| times -- so this is the one place a
   // tolerance is used.
-  // Skipped when the 8D product was not materialised: the region list is then
-  // present but every entry is empty.
+  // Skipped when the 8D product was not materialised, which leaves the region
+  // list empty rather than populated with empty entries; the guard covers
+  // both shapes.
   const auto& region_vertices = phase_geometries_[phase].region_vertices;
   if (!region_vertices.empty() && !region_vertices.front().empty()) {
     const int sample = std::min<int>(8, static_cast<int>(

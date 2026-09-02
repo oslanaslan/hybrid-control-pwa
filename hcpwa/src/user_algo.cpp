@@ -1290,10 +1290,14 @@ for (size_t i136 = 0; i136 < intersection_points_136.size(); i136++) {
           indices_247.end());
       intersection_prism_indices_phase0.back().push_back(i58);
 
-      for (size_t j136 = 0;
-           j136 < intersection_prism_indices_136[i136].size(); j136++) {
-        for (size_t j247 = 0;
-             j247 < intersection_prism_indices_247[i247].size(); j247++) {
+      // The 8D area is the product of the two 3D group cells and the 2D
+      // polygon, so every vertex triple must be emitted. Bound the loops by
+      // the vertex arrays, not by intersection_prism_indices_*, which always
+      // holds exactly the two prism ids {idx0, idx1} that formed the cell.
+      for (size_t j136 = 0; j136 < intersection_points_136[i136].size();
+           j136++) {
+        for (size_t j247 = 0; j247 < intersection_points_247[i247].size();
+             j247++) {
           for (size_t j58 = 0; j58 < polygons58[i58].polygon.size(); j58++) {
             const auto& v136 = intersection_points_136[i136][j136];
             const auto& v247 = intersection_points_247[i247][j247];
@@ -1371,10 +1375,12 @@ for (size_t i157 = 0; i157 < intersection_points_157.size(); i157++) {
           indices_468.end());
       intersection_prism_indices_phase1.back().push_back(i23);
 
-      for (size_t j157 = 0;
-           j157 < intersection_prism_indices_157[i157].size(); j157++) {
-        for (size_t j468 = 0;
-             j468 < intersection_prism_indices_468[i468].size(); j468++) {
+      // See the phase-0 note above: bound by the vertex arrays, not by the
+      // two-element prism-index arrays.
+      for (size_t j157 = 0; j157 < intersection_points_157[i157].size();
+           j157++) {
+        for (size_t j468 = 0; j468 < intersection_points_468[i468].size();
+             j468++) {
           for (size_t j23 = 0; j23 < polygons23[i23].polygon.size(); j23++) {
             const auto& v157 = intersection_points_157[i157][j157];
             const auto& v468 = intersection_points_468[i468][j468];
@@ -1580,11 +1586,15 @@ PolygonAreasVerticesResult compute_polygon_areas_vertices(
       = intersection_result.intersection_prism_indices_phase1;
 
   PolygonAreasVerticesResult result;
-  // Intersection points and indices
-  result.intersection_points_phase0 = intersection_points_phase0;
-  result.intersection_prism_indices_phase0 = intersection_prism_indices_phase0;
-  result.intersection_points_phase1 = intersection_points_phase1;
-  result.intersection_prism_indices_phase1 = intersection_prism_indices_phase1;
+  // Intersection points and indices. Moved, not copied: the full vertex
+  // product is gigabytes at production N, and intersection_result is dead
+  // after this point.
+  result.intersection_points_phase0 = std::move(intersection_points_phase0);
+  result.intersection_prism_indices_phase0
+      = std::move(intersection_prism_indices_phase0);
+  result.intersection_points_phase1 = std::move(intersection_points_phase1);
+  result.intersection_prism_indices_phase1
+      = std::move(intersection_prism_indices_phase1);
 
   if (verbose) {
     std::cout << "result.intersection_points_phase0.size(): "

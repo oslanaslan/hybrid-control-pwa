@@ -374,3 +374,89 @@ TEST(user_algo, area_vertices_are_the_full_product_of_group_cells) {
              << " 157=" << n157 << " 468=" << n468 << ", phase-0 area has "
              << result.intersection_points_phase0[0].size() << " vertices\n";
 }
+
+// The same regression for the POLYGON overload of compute_intersection_points().
+//
+// That overload had the identical vertex-truncation bug: its four inner loops
+// were bounded by intersection_prism_indices_*[i].size(), which is always 2,
+// so every 8D area came out with 2 * 2 * |polygon| vertices instead of the
+// full product. The polygon path has no block factorisation to fall back on --
+// global_affine_appoximator.cpp turns each of these vertices into one LP
+// feasibility row -- so a truncated set silently makes its result not a bound.
+//
+// Hand-made one-polygon-per-plane geometry, for the same reason as above: the
+// full pipeline is far too slow for a unit test. The polygon is a
+// non-degenerate quadrilateral, so the truncated assembly would emit 16
+// vertices where the product is much larger.
+TEST(user_algo, polygon_area_vertices_are_the_full_product_of_group_cells) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  constexpr hcpwa::Float N = 10;
+
+  hcpwa::PolygonResolution res;
+  res.polygon = {{0, 0}, {N, 0}, {N, N / 2}, {0, N}};
+
+  // Phase 0 tuple order [31, 36, 24, 27, 58], phase 1 [51, 57, 84, 86, 23].
+  auto prism = [&res](std::array<int, 2> dims) {
+    return std::vector<hcpwa::LineSet<8>>{hcpwa::CalcPrism(res.polygon, dims)};
+  };
+  const std::vector<hcpwa::PolygonResolution> polys = {res};
+
+  const hcpwa::PhaseIntersectionResult result
+      = hcpwa::compute_intersection_points(
+          prism({0, 2}), prism({2, 5}), prism({1, 3}), prism({1, 6}),
+          prism({4, 7}), prism({0, 4}), prism({4, 6}), prism({3, 7}),
+          prism({5, 7}), prism({1, 2}), polys, polys, N, /*verbose=*/false);
+
+  // Independently rebuild each 3D group cell the way computend() does, so the
+  // expected factor sizes come from the geometry rather than from the code
+  // under test.
+  const hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
+  auto group_cell_vertices = [&aabb3d](const hcpwa::LineSet<8>& p0,
+                                       const hcpwa::LineSet<8>& p1,
+                                       std::array<int, 3> dims) {
+    hcpwa::LineSet<3> lines = hcpwa::AABBBounds(aabb3d);
+    for (const auto& l : hcpwa::DimensionCast<3, 8>(p0, dims)) {
+      lines.push_back(l);
+    }
+    for (const auto& l : hcpwa::DimensionCast<3, 8>(p1, dims)) {
+      lines.push_back(l);
+    }
+    return hcpwa::LinesToPoints<3>(lines).size();
+  };
+
+  const std::size_t n_poly = res.polygon.size();
+  const std::size_t n136
+      = group_cell_vertices(hcpwa::CalcPrism(res.polygon, {0, 2}),
+                            hcpwa::CalcPrism(res.polygon, {2, 5}), {0, 2, 5});
+  const std::size_t n247
+      = group_cell_vertices(hcpwa::CalcPrism(res.polygon, {1, 3}),
+                            hcpwa::CalcPrism(res.polygon, {1, 6}), {1, 3, 6});
+
+  ASSERT_EQ(result.intersection_points_phase0.size(), 1U);
+  ASSERT_GT(n136, 2U) << "degenerate fixture: the group cell must have more "
+                         "than the 2 vertices the old bound would emit";
+  ASSERT_GT(n247, 2U);
+
+  EXPECT_EQ(result.intersection_points_phase0[0].size(), n136 * n247 * n_poly)
+      << "phase-0 area is not the full product of its two group cells and the "
+         "2D polygon";
+
+  const std::size_t n157
+      = group_cell_vertices(hcpwa::CalcPrism(res.polygon, {0, 4}),
+                            hcpwa::CalcPrism(res.polygon, {4, 6}), {0, 4, 6});
+  const std::size_t n468
+      = group_cell_vertices(hcpwa::CalcPrism(res.polygon, {3, 7}),
+                            hcpwa::CalcPrism(res.polygon, {5, 7}), {3, 5, 7});
+
+  ASSERT_EQ(result.intersection_points_phase1.size(), 1U);
+  EXPECT_EQ(result.intersection_points_phase1[0].size(), n157 * n468 * n_poly)
+      << "phase-1 area is not the full product of its two group cells and the "
+         "2D polygon";
+
+  GTEST_COUT << " group cell sizes: 136=" << n136 << " 247=" << n247
+             << " 157=" << n157 << " 468=" << n468 << ", polygon=" << n_poly
+             << ", phase-0 area has "
+             << result.intersection_points_phase0[0].size() << " vertices\n";
+}

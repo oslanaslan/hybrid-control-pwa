@@ -459,6 +459,15 @@ struct SubproblemResult {
   // Per emitted group-2 row, in order, together with its (plane, pool index).
   std::vector<double> mu;
   std::vector<std::pair<int, int>> group2;
+  // The whole primal point, kept only so that a cut which fails its separation
+  // check can be explained. Nineteen doubles, so always filled rather than
+  // gated on a flag: the failure is rare and reproducing it costs hours.
+  std::array<double, kSubCols> primal{};
+  // Row counts of the two groups, for the same reason: the dual objective is
+  // assembled group by group, and knowing which group is short is the whole
+  // diagnosis.
+  int group1_rows = 0;
+  int group2_rows = 0;
 };
 
 }  // namespace
@@ -855,6 +864,12 @@ SubproblemResult solveRegionSubproblem(
 
   const auto& ssol = sub.getSolution();
   out.zeta = ssol.col_value[static_cast<std::size_t>(kSubZetaCol)];
+  for (int k = 0; k < kSubCols; ++k) {
+    out.primal[static_cast<std::size_t>(k)]
+        = ssol.col_value[static_cast<std::size_t>(k)];
+  }
+  out.group1_rows = coup_row;
+  out.group2_rows = static_cast<int>(out.group2.size());
   for (int s2 = 0; s2 < kSubsystemCount; ++s2) {
     for (int k = 0; k < 2; ++k) {
       out.c[static_cast<std::size_t>(2 * s2 + k)]
@@ -1602,8 +1617,17 @@ std::vector<double> CourierBorderSolver::solve(
     }
 
     const auto& sol = master.getSolution();
+    // How far the master actually moved. A cutting-plane loop that adds
+    // separating cuts every iteration and still returns the same point is
+    // stalled, not converging slowly, and the two look identical in a log that
+    // only prints zeta to four digits. Measured here so that the distinction
+    // is a number rather than an inference.
+    double z_step = 0.0;
     for (int i = 0; i < n_cols; ++i) {
-      z[static_cast<std::size_t>(i)] = sol.col_value[static_cast<std::size_t>(i)];
+      const double next = sol.col_value[static_cast<std::size_t>(i)];
+      z_step = std::max(z_step,
+                        std::abs(next - z[static_cast<std::size_t>(i)]));
+      z[static_cast<std::size_t>(i)] = next;
     }
     // Back on the caller's scale: the objective is a pure linear form in z with
     // no constant term, so undoing the normalisation is exact.
@@ -1858,12 +1882,49 @@ std::vector<double> CourierBorderSolver::solve(
       if (sub.zeta > 10.0 * kHighsSolutionTol && sep < 0.5 * sub.zeta) {
         ++non_separating_cuts;
         if (non_separating_cuts == 1) {
+          // The full picture, once per node. Reproducing this state costs
+          // hours at N=160, so the first failure prints everything the
+          // diagnosis needs rather than a status line.
+          //
+          // sep is the dual objective of the subproblem read back through the
+          // multipliers: sigma * row^T z is the group-1 contribution, since
+          // that group's right-hand side is sigma * V_b(nu; z) = sigma *
+          // phi_b(nu)^T z, and sigma * rhs is the group-2 contribution. At an
+          // optimal basis it must equal zeta, which is the primal objective.
+          // primal_gap re-derives zeta from the primal columns instead --
+          // max(0, sum_b t_b - sum_s d_s) -- so a mismatch there indicts the
+          // solve, and a mismatch only in sep indicts this reconstruction.
+          double sum_t = 0.0;
+          for (int b = 0; b < kBlockCount; ++b) {
+            sum_t += sub.primal[static_cast<std::size_t>(subTCol(b))];
+          }
+          double sum_d = 0.0;
+          for (int s2 = 0; s2 < kSubsystemCount; ++s2) {
+            sum_d += sub.primal[static_cast<std::size_t>(3 * s2 + 2)];
+          }
+          std::array<double, kBlockCount> lambda_mass{};
+          for (int b = 0; b < kBlockCount; ++b) {
+            for (const double v : sub.lambda[static_cast<std::size_t>(b)]) {
+              lambda_mass[static_cast<std::size_t>(b)] += v;
+            }
+          }
+          double mu_mass = 0.0;
+          for (const double v : sub.mu) {
+            mu_mass += v;
+          }
           logger_->warn(
               "courier sweep: cut does not separate z*, separation {} vs zeta "
-              "{}; block cells ({}, {}, {}), ladder rung {}. The multipliers "
-              "are not the optimal duals; dropping the cut and continuing. "
-              "Further occurrences are counted, not logged.",
-              sep, sub.zeta, js[0], js[1], js[2], sub.rung);
+              "{}; block cells ({}, {}, {}), ladder rung {}. "
+              "row^T z {}, rhs {}, sigma {}. "
+              "primal: sum_b t_b {}, sum_s d_s {}, difference {} (zeta column "
+              "{}). duals: kappa {}, lambda masses ({}, {}, {}), mu mass {} "
+              "over {} group-2 rows and {} group-1 rows. "
+              "Dropping the cut and continuing; further occurrences are "
+              "counted, not logged.",
+              sep, sub.zeta, js[0], js[1], js[2], sub.rung, row.dot(z), rhs,
+              sigma, sum_t, sum_d, sum_t - sum_d, sub.zeta, sub.kappa,
+              lambda_mass[0], lambda_mass[1], lambda_mass[2], mu_mass,
+              sub.group2_rows, sub.group1_rows);
         }
         continue;
       }
@@ -1882,13 +1943,13 @@ std::vector<double> CourierBorderSolver::solve(
     logger_->info(
         "courier sweep: iter={} visited {} regions in {:.1f}s, {} screened by "
         "{} cached couriers, worst zeta {:.3e}, violations {}, "
-        "non-separating cuts dropped {}",
+        "non-separating cuts dropped {}, master step {:.3e}, master rows {}",
         iter, visited,
         std::chrono::duration<double>(std::chrono::steady_clock::now()
                                       - sweep_started_at)
             .count(),
         screened, cache.size(), worst, violations.size(),
-        non_separating_cuts);
+        non_separating_cuts, z_step, row_lower.size());
     // Over the visited prefix only, when the sweep stopped early.
     local_stats.worst_zeta = worst;
 

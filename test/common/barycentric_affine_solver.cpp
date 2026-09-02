@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+
+#include <cstdlib>
 #include <hcpwa.hpp>
 #include <algo.hpp>
 #include "cddwrap/cdd.hpp"
@@ -67,8 +69,39 @@ create_barycentric_approximator() {
       approximation_mode);
 }
 
+// Deliberately coarse, so that a complete solution is reachable at N=160.
+//
+// certificate_tol decides both whether a region counts as violated and whether
+// a cached courier may certify it, so it drives the cost twice over. At the
+// library default the screen covered 1 117 regions out of 1.12 million -- 0.1%
+// -- and every sweep was 1.12 million subproblem LPs, 210 seconds each, with a
+// dozen sweeps per border condition. Loosening it lets one courier stand in for
+// many neighbouring regions, which is what made the N=100 run finish in four
+// iterations.
+//
+// The value function here is of order 1e2 to 1e3, so 1e-2 of absolute slack on
+// the border condition is roughly 1e-5 relative. Coarse, and deliberately so;
+// move it back towards the library default to tighten.
+static barycentric_affine_approximator::CourierBorderOptions
+coarse_courier_options() {
+  barycentric_affine_approximator::CourierBorderOptions options;
+  options.certificate_tol = 1e-2;
+  options.max_certificate_cache = 512;
+  return options;
+}
+
 TEST(common, barycentric_affine_solver) {
   auto barycentric_approximator = create_barycentric_approximator();
+  barycentric_approximator.setCourierOptions(coarse_courier_options());
 
-  barycentric_approximator.run("/root/gitlab/hybrid-control-pwa/results/barycentric/lower/first_run/", 16);
+  // The default is the production machine's results tree. Overridable so the
+  // same test can be run anywhere without editing it; run() throws if the
+  // directory does not exist, which is the whole failure on any other host.
+  const char* out = std::getenv("HCPWA_RESULTS_DIR");
+  barycentric_approximator.run(
+      out != nullptr
+          ? out
+          : "/root/gitlab/hybrid-control-pwa/results/barycentric/lower/"
+            "first_run/",
+      16);
 }

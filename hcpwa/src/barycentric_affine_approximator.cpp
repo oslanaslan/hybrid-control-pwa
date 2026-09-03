@@ -52,6 +52,10 @@ constexpr double kHighsPdlpOptimalityTol = 1e-6;
 constexpr double kLpPrimalFeasibilityLimit
     = barycentric_affine_approximator::kResidualValidationTol;
 
+// Cap on simplex iterations for one reduced LP. See the comment at the option
+// itself for the measurement behind the number.
+constexpr int kLpSimplexIterationLimit = 400000;
+
 // Converts hcpwa::Vec<2> to Eigen::Vector2d. Keeping this tiny conversion helper
 // avoids mixing two vector APIs inside the indexing-heavy barycentric code.
 Eigen::Vector2d toEigen2(const hcpwa::Vec<2>& v) {
@@ -1200,6 +1204,17 @@ BarycentricAffineApproximator::initializeHighs(int phase) {
   // matrix entries at or below it, and a dropped rho would weaken row (L).
   highs->setOptionValue("small_matrix_value",
                         block_reduction::kSmallMatrixValue);
+  // A cycling LP has to end. One step-4 solve ran 3.8 million simplex
+  // iterations over twenty-three minutes with the objective oscillating
+  // between exactly two values, 3.9329410965e+10 and 3.9329380573e+10, and the
+  // primal infeasibility pinned at exactly 1.52588e-05 -- degenerate cycling,
+  // not slow progress. The worst honest solve in the same run took 78403
+  // iterations, so this cap is five times that: far out of the way of a
+  // genuine solve, and about two minutes for one that has stopped moving.
+  //
+  // What comes back at the cap is handled by solveLp: a primal-feasible point
+  // is accepted as a coarser bound, anything else is fatal.
+  highs->setOptionValue("simplex_iteration_limit", kLpSimplexIterationLimit);
   highs->setOptionValue("log_to_console", highs_verbose_);
 
   // The objective is the l1 norm of the residuals measured at the endpoint with
@@ -1348,8 +1363,17 @@ std::vector<double> BarycentricAffineApproximator::solveLp(
     //
     // Anything else -- Infeasible, Unbounded, a solve error -- is fatal: those
     // carry no usable primal point at all.
-    const bool primal_feasible
+    // kIterationLimit joins kUnknown here for the same reason and on the same
+    // terms. Both hand back a point the solver would not certify -- one
+    // because it ran out of the budget above, the other because it could not
+    // meet its own tolerances -- and in both cases what decides whether the
+    // step is usable is primal feasibility, checked below and then re-derived
+    // from the formulas by validateStepResiduals.
+    const bool budget_or_tolerance
         = model_status == HighsModelStatus::kUnknown
+          || model_status == HighsModelStatus::kIterationLimit;
+    const bool primal_feasible
+        = budget_or_tolerance
           && info.primal_solution_status == kSolutionStatusFeasible
           && info.max_primal_infeasibility <= kLpPrimalFeasibilityLimit;
     if (!primal_feasible) {

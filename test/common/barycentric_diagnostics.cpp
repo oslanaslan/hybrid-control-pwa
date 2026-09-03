@@ -365,6 +365,72 @@ TEST(common, DISABLED_gauge_nullspace) {
     std::cout << std::format(
         "\n  >>> null directions surviving the gauge fixing: {}\n",
         nullity - krank);
+
+    // The decisive follow-up. The per-level growth of x is measured on
+    // coefficients, which drift is free to inflate. The growth actually
+    // reported per level in the run logs is the courier master's objective,
+    // w^T z with w = node_weights, and w_j is the integral of basis function j.
+    // If w annihilates the surviving directions, that objective is a property
+    // of the represented function alone, and no amount of drift can move it --
+    // which would mean the gauge cannot be the cause of the level-to-level
+    // growth, only of the coefficient blow-up.
+    const Eigen::VectorXd& w
+        = approx.nodeWeights()[static_cast<std::size_t>(phase)];
+    std::cout << "  node-weight objective on the kernel basis (relative):\n";
+    for (int i = 0; i < nullity; ++i) {
+      Eigen::VectorXd d(layout.num_x);
+      for (int k = 0; k < layout.num_x; ++k) {
+        d(k) = svd.matrixV()(k, layout.num_x - nullity + i);
+      }
+      const double num = std::abs(w.head(layout.num_x).dot(d));
+      const double den = w.head(layout.num_x).norm() * d.norm();
+      std::cout << std::format("    kernel vector {}: |w^T d| = {:.3e}, "
+                               "|w^T d| / (|w| |d|) = {:.3e}\n",
+                               i, num, den > 0.0 ? num / den : 0.0);
+    }
+    for (const NullCandidate& cand : candidates) {
+      Eigen::VectorXd d(layout.num_x);
+      for (int k = 0; k < layout.num_x; ++k) {
+        d(k) = cand.d[static_cast<std::size_t>(k)];
+      }
+      const double num = std::abs(w.head(layout.num_x).dot(d));
+      const double den = w.head(layout.num_x).norm() * d.norm();
+      std::cout << std::format("    predicted dir (block {} planes {}/{}): "
+                               "|w^T d| / (|w| |d|) = {:.3e}\n",
+                               cand.block, cand.layer_plus, cand.layer_minus,
+                               den > 0.0 ? num / den : 0.0);
+
+      // Split it. Each half alone represents the linear function n_shared on
+      // all of Omega -- barycentric interpolation of a linear function is
+      // exact -- so each half's node-weight integral must equal the analytic
+      // integral of n_shared over Omega = [0,N]^8, which is N^9 / 2. If the
+      // halves disagree with that, w and the basis are not indexed the same
+      // way, and the master has been maximising something that is not the
+      // integral of the represented function.
+      Eigen::VectorXd d_plus = Eigen::VectorXd::Zero(layout.num_x);
+      Eigen::VectorXd d_minus = Eigen::VectorXd::Zero(layout.num_x);
+      for (int k = 0; k < layout.eta_s[static_cast<std::size_t>(
+                              cand.layer_plus)]; ++k) {
+        const int col = layout.idxX(cand.layer_plus, k);
+        d_plus(col) = cand.d[static_cast<std::size_t>(col)];
+      }
+      for (int k = 0; k < layout.eta_s[static_cast<std::size_t>(
+                              cand.layer_minus)]; ++k) {
+        const int col = layout.idxX(cand.layer_minus, k);
+        d_minus(col) = cand.d[static_cast<std::size_t>(col)];
+      }
+      const double analytic = std::pow(kN, 9) / 2.0;
+      const double ip = w.head(layout.num_x).dot(d_plus);
+      const double im = -w.head(layout.num_x).dot(d_minus);
+      std::cout << std::format(
+          "      integral of n_{} from plane {} = {:.6e}  (ratio to analytic "
+          "{:.6f})\n"
+          "      integral of n_{} from plane {} = {:.6e}  (ratio to analytic "
+          "{:.6f})\n"
+          "      analytic N^9/2 = {:.6e}\n",
+          cand.shared_coord, cand.layer_plus, ip, ip / analytic,
+          cand.shared_coord, cand.layer_minus, im, im / analytic, analytic);
+    }
   }
 }
 

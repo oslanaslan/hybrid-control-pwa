@@ -1,5 +1,6 @@
 #include <algo.hpp>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include "cddwrap/lineareq.hpp"
 #include "morph.hpp"
@@ -90,9 +91,42 @@ std::vector<std::pair<hcpwa::Triangle, std::size_t>> Triangulate(
 
   for (std::size_t i = 0; i < data.size(); i++) {
     const auto& poly = data[i].polygon;
-    const auto& a = poly[0];
-    for (std::size_t j = 2; j < poly.size(); j++) {
-      result.emplace_back(Triangle{.a = a, .b = poly[j - 1], .c = poly[j]}, i);
+    if (poly.size() < 3) {
+      continue;
+    }
+    // The vertices arrive from LinesToPoints, which reads them out of cddlib's
+    // extreme-point enumeration -- a set, with no boundary order. A fan needs
+    // one. Without it the fan's triangles overlap each other and leave the rest
+    // of the cell uncovered, and because the caller sums |area| the two errors
+    // partly cancel and the total looks plausible. Measured before this fix, on
+    // the N=160 production geometry: every projection layer covered between
+    // 80.6% and 98.1% of [0,N]^2 with 1.9% to 9.3% covered twice, while the
+    // summed |area| sat within 1% of N^2 on three layers out of ten and was
+    // exact on two of them.
+    //
+    // These cells are intersections of half-planes, hence convex, so sorting
+    // the vertices by angle about the centroid is exactly the boundary order
+    // and the fan from any one of them is then a true triangulation.
+    std::vector<hcpwa::Vec<2>> ordered(poly.begin(), poly.end());
+    double cx = 0.0;
+    double cy = 0.0;
+    for (const auto& p : ordered) {
+      cx += static_cast<double>(p[0]);
+      cy += static_cast<double>(p[1]);
+    }
+    cx /= static_cast<double>(ordered.size());
+    cy /= static_cast<double>(ordered.size());
+    std::sort(ordered.begin(), ordered.end(),
+              [cx, cy](const hcpwa::Vec<2>& p, const hcpwa::Vec<2>& q) {
+                return std::atan2(static_cast<double>(p[1]) - cy,
+                                  static_cast<double>(p[0]) - cx)
+                       < std::atan2(static_cast<double>(q[1]) - cy,
+                                    static_cast<double>(q[0]) - cx);
+              });
+    const auto& a = ordered[0];
+    for (std::size_t j = 2; j < ordered.size(); j++) {
+      result.emplace_back(
+          Triangle{.a = a, .b = ordered[j - 1], .c = ordered[j]}, i);
     }
   }
   return result;

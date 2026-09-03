@@ -649,3 +649,97 @@ TEST(common, DISABLED_border_vs_candidates) {
                                      : border_integral / best_candidate_integral,
       candidates.size());
 }
+
+// ---------------------------------------------------------------------------
+// Where the node weights lose their area.
+//
+// computeNodeWeights sums |area| over the triangles of each projection layer
+// and the total must be N^2 per layer. It is not: the identity 1^T w = 5 N^8
+// is off by 3.23% and 2.21%, concentrated in layer 3 (-14.9% and -8.1%).
+//
+// Summing areas cannot distinguish a hole in the tiling from triangles that
+// overlap or run outside the square, so this samples the square instead and
+// counts how many triangles cover each point. Coverage below 1 is a hole;
+// mean multiplicity above 1 is overlap.
+static Eigen::Vector2d toEigen2(const hcpwa::Vec<2>& v) {
+  return Eigen::Vector2d(static_cast<double>(v[0]), static_cast<double>(v[1]));
+}
+
+TEST(common, DISABLED_triangulation_coverage) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  auto approx = makeApproximator(240);
+  approx.getIntersectionPoints();
+
+  constexpr int kGrid = 400;
+  for (int phase = 0; phase < baa::kPhases; ++phase) {
+    const auto& geometry
+        = approx.phaseGeometries()[static_cast<std::size_t>(phase)];
+    std::cout << std::format("\n=== phase {} ===\n", phase);
+    for (int s = 0; s < baa::kSubsystemCount; ++s) {
+      const auto& tris = geometry.layers[static_cast<std::size_t>(s)].triangles;
+      long long covered = 0;
+      long long multi = 0;
+      long long total = 0;
+      double signed_area = 0.0;
+      double abs_area = 0.0;
+      double outside_area = 0.0;
+      for (const auto& t : tris) {
+        const Eigen::Vector2d a = toEigen2(t.a);
+        const Eigen::Vector2d b = toEigen2(t.b);
+        const Eigen::Vector2d c = toEigen2(t.c);
+        const double cross2 = (b(0) - a(0)) * (c(1) - a(1))
+                              - (c(0) - a(0)) * (b(1) - a(1));
+        signed_area += 0.5 * cross2;
+        abs_area += 0.5 * std::abs(cross2);
+        // Any vertex outside [0,N]^2 means the triangle leaves the square.
+        for (const Eigen::Vector2d& v : {a, b, c}) {
+          if (v(0) < -1e-6 || v(0) > kN + 1e-6 || v(1) < -1e-6
+              || v(1) > kN + 1e-6) {
+            outside_area += 0.5 * std::abs(cross2);
+            break;
+          }
+        }
+      }
+      for (int gi = 0; gi < kGrid; ++gi) {
+        for (int gj = 0; gj < kGrid; ++gj) {
+          const double px = kN * (gi + 0.5) / kGrid;
+          const double py = kN * (gj + 0.5) / kGrid;
+          int hits = 0;
+          for (const auto& t : tris) {
+            const Eigen::Vector2d a = toEigen2(t.a);
+            const Eigen::Vector2d b = toEigen2(t.b);
+            const Eigen::Vector2d c = toEigen2(t.c);
+            const double d1 = (px - b(0)) * (a(1) - b(1))
+                              - (a(0) - b(0)) * (py - b(1));
+            const double d2 = (px - c(0)) * (b(1) - c(1))
+                              - (b(0) - c(0)) * (py - c(1));
+            const double d3 = (px - a(0)) * (c(1) - a(1))
+                              - (c(0) - a(0)) * (py - a(1));
+            const bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+            const bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+            if (!(neg && pos)) {
+              ++hits;
+            }
+          }
+          ++total;
+          if (hits >= 1) {
+            ++covered;
+          }
+          if (hits >= 2) {
+            ++multi;
+          }
+        }
+      }
+      std::cout << std::format(
+          "  layer {}: {:2} triangles, sum|area| = {:9.2f} ({:+7.3f}%), "
+          "signed = {:9.2f}, outside-square = {:8.2f}\n"
+          "            grid coverage = {:6.2f}%, multiply covered = {:6.2f}%\n",
+          s, tris.size(), abs_area, 100.0 * (abs_area / (kN * kN) - 1.0),
+          signed_area, outside_area,
+          100.0 * static_cast<double>(covered) / static_cast<double>(total),
+          100.0 * static_cast<double>(multi) / static_cast<double>(total));
+    }
+  }
+}

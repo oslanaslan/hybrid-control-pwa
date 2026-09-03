@@ -583,9 +583,7 @@ void BarycentricAffineApproximator::computeNodeWeights() {
         throw std::runtime_error(
             "computeNodeWeights: triangle and basis counts differ");
       }
-      logger_->info(
-          "computeNodeWeights: phase {}/{} subsystem {}/{} triangles={}",
-          phase + 1, kPhases, s + 1, kSubsystemCount, layer.triangles.size());
+      double layer_area = 0.0;
       for (std::size_t m = 0; m < layer.triangles.size(); ++m) {
         const Eigen::Vector2d a = toEigen2(layer.triangles[m].a);
         const Eigen::Vector2d b = toEigen2(layer.triangles[m].b);
@@ -599,11 +597,20 @@ void BarycentricAffineApproximator::computeNodeWeights() {
               = layout.idxX(s, layer.bases[m].vertex_ids[local_vertex]);
           w(col) += n6 * area / 3.0;
         }
+        layer_area += area;
         ++processed_triangles;
         if ((processed_triangles % 10000) == 0) {
           report_progress(false, phase, s);
         }
       }
+      // Per layer, because the aggregate identity below only says that some
+      // area is missing, not which projection plane lost it.
+      const double square = system_params_.N * system_params_.N;
+      logger_->info(
+          "computeNodeWeights: phase {}/{} subsystem {}/{} triangles={} "
+          "area={:.4f} of N^2={:.4f} ({:+.3f}%)",
+          phase + 1, kPhases, s + 1, kSubsystemCount, layer.triangles.size(),
+          layer_area, square, 100.0 * (layer_area / square - 1.0));
       report_progress(true, phase, s);
     }
 
@@ -613,16 +620,27 @@ void BarycentricAffineApproximator::computeNodeWeights() {
     const double w_sum = w.sum();
     const double abs_diff = std::abs(w_sum - expected);
     const double rel_error = abs_diff / expected;
-    // if (abs_diff > 1e-6 * expected) {
-    //   throw std::runtime_error(
-    //       std::format(
-    //           "computeNodeWeights: node weights failed the 1^T w = 5 N^8 identity. w.sum = {:.16f}, expected = {:.16f}, abs_diff = {:.16f}, rel_error = {:.16e}",
-    //           w_sum, expected, abs_diff, rel_error)
-    //       );
-    // }
+    // Live again. It was commented out while the triangulation handed back
+    // unordered cell vertices, and with the throw gone the log line still said
+    // "identity ok" beside a relative error of 3.2e-02 -- so the one check that
+    // would have caught it reported success instead. The weights are the
+    // courier master's objective, and an objective that is not the integral of
+    // the represented function is not blind to the gauge nullspace: it gives
+    // the master an improving ray at zero constraint cost, which is why every
+    // border solve saturated its box. Fixing Triangulate to order the vertices
+    // brought every layer to N^2 exactly; if this fires again, the tiling
+    // broke again, and nothing downstream is trustworthy until it is fixed.
+    if (abs_diff > 1e-6 * expected) {
+      throw std::runtime_error(std::format(
+          "computeNodeWeights: node weights failed the 1^T w = 5 N^8 identity. "
+          "w.sum = {:.16e}, expected = {:.16e}, rel_error = {:.6e}. The "
+          "projection layers do not tile [0,N]^2; see "
+          "DISABLED_triangulation_coverage.",
+          w_sum, expected, rel_error));
+    }
     logger_->info(
-        "computeNodeWeights: phase {}/{} identity ok (w.sum={:.6f}, "
-        "expected={:.6f}, rel_error={:.3e})",
+        "computeNodeWeights: phase {}/{} identity holds (w.sum={:.6e}, "
+        "expected={:.6e}, rel_error={:.3e})",
         phase + 1, kPhases, w_sum, expected, rel_error);
     node_weights_[phase] = std::move(w);
   }

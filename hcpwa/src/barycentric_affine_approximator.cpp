@@ -1133,6 +1133,49 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
       candidates.push_back(std::move(x_src));
     }
   }
+  // Keep only the most promising candidates when there are more than the cap.
+  // Sound at any cap -- a maximum over a subset is no larger, so the condition
+  // certified here is the stronger one -- and what it buys is a courier cost
+  // that does not grow with the level. See setMaxBorderCandidates.
+  //
+  // "Most promising" is measured by the integral of the represented function,
+  // q^T x, which is the same gauge-invariant functional the band LP maximises:
+  // among estimates of the same family the one that integrates highest is the
+  // one most likely to be the pointwise maximum. The choice only affects
+  // tightness, never validity, so a cheap proxy is the right kind of rule.
+  if (max_border_candidates_ > 0
+      && static_cast<int>(candidates.size()) > max_border_candidates_) {
+    const Eigen::VectorXd& q
+        = node_weights_[static_cast<std::size_t>(source_phase)];
+    std::vector<std::pair<double, std::size_t>> ranked;
+    ranked.reserve(candidates.size());
+    for (std::size_t c = 0; c < candidates.size(); ++c) {
+      double dot = 0.0;
+      for (int i = 0; i < q.size(); ++i) {
+        dot += q(i) * candidates[c][static_cast<std::size_t>(i)];
+      }
+      ranked.emplace_back(dot, c);
+    }
+    // Descending by integral, and by index for a reproducible tie-break.
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) {
+                return a.first != b.first ? a.first > b.first
+                                          : a.second < b.second;
+              });
+    std::vector<std::vector<double>> kept;
+    kept.reserve(static_cast<std::size_t>(max_border_candidates_));
+    for (int i = 0; i < max_border_candidates_; ++i) {
+      kept.push_back(std::move(
+          candidates[ranked[static_cast<std::size_t>(i)].second]));
+    }
+    logger_->info(
+        "getBorderConditions: theta_idx={}, switch_cnt={}, source_phase={}: "
+        "kept the {} highest-integral candidates of {}",
+        theta_idx, switch_cnt, source_phase, max_border_candidates_,
+        candidates.size());
+    candidates = std::move(kept);
+  }
+
   if (candidates.empty()) {
     // No reachable predecessor, by the construction of the theta lists rather
     // than by anything going wrong here.

@@ -157,6 +157,8 @@ class BarycentricAffineApproximator {
   bool validate_ = false;
 
   BandLpOptions band_options_;
+  // 0 = keep every candidate; see setMaxBorderCandidates.
+  int max_border_candidates_ = 0;
 
   hcpwa::TriangleGeometryOptions geometry_options_;
 
@@ -245,6 +247,30 @@ class BarycentricAffineApproximator {
   // -- terminal family, courier border conditions, the band LP with a nonzero
   // terminal value -- at a fraction of the cost. Can only lower the count the
   // constructor derived from the horizon, never raise it.
+  // Caps how many of the available (level, switching instant) pairs the
+  // transfer step maximises over; 0 leaves every one of them in.
+  //
+  // Sound at any cap. The step has to certify
+  //   Vt^(p)(theta, n) <= max over ALL earlier estimates in the window,
+  // and a maximum over a subset is no larger, so certifying against the subset
+  // is the stronger requirement -- the result stays a lower bound and only
+  // gets looser. What it buys is a bounded cost: the number of available pairs
+  // grows with the level, because V^(r) is defined for theta in
+  // [T - r tau_max, T - r tau_min] and the count of r whose window contains a
+  // given theta grows like (T - theta)(1/tau_min - 1/tau_max) -- 761 pairs at
+  // level 120 of the production configuration, against one at level 1. The
+  // courier's cost is linear in that count twice over (the per-region choice
+  // of rho and the subproblem's second condition), and the measured node time
+  // follows: 113 s + 9.7 s per candidate. Uncapped, the production run is
+  // about 575 hours on 32 threads; at 32 candidates it is about 90.
+  void setMaxBorderCandidates(int max_candidates) {
+    if (max_candidates < 0) {
+      throw std::invalid_argument(
+          "setMaxBorderCandidates: negative candidate cap");
+    }
+    max_border_candidates_ = max_candidates;
+  }
+
   void setMaxSwitches(int max_switches) {
     if (max_switches < 0) {
       throw std::invalid_argument("setMaxSwitches: negative level count");

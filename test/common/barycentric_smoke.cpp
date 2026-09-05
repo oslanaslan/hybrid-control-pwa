@@ -103,3 +103,45 @@ TEST(barycentric_smoke, rejects_invalid_construction) {
                                              /*tau_max=*/60.0, makeParams()),
                std::invalid_argument);
 }
+
+// The grid of admissible next switching instants must lie inside the window
+// [theta + tau_min, theta + tau_max], clamped to the horizon.
+//
+// This is a soundness invariant, not a tidiness one. The transfer step
+// certifies Vt^(p)(theta) <= max over Theta of the earlier estimates, and that
+// implies the bound on V^(p) only because the maximum over Theta is no larger
+// than the maximum over the true window -- which needs Theta inside it. A
+// half-grid-step slack used to be applied here, and at the production grid
+// (T = 1200 on 240 points, dt = 5.0209) it admitted theta + 50.209 against
+// tau_max = 50 for 230 of the 240 grid values of theta.
+TEST(barycentric_smoke, admissible_switching_instants_stay_in_the_window) {
+  using barycentric_affine_approximator::BarycentricAffineApproximator;
+  constexpr double kTMax = 1200.0;
+  constexpr int kSplit = 240;
+  constexpr double kTauMin = 10.0;
+  constexpr double kTauMax = 50.0;
+  BarycentricAffineApproximator approximator(kTMax, kSplit, kTauMin, kTauMax,
+                                             makeParams(), false);
+  const double dt = kTMax / (kSplit - 1);
+  // Tolerance for the grid arithmetic only: two orders below the smallest
+  // feature of the window, and four below the overshoot the slack produced.
+  constexpr double kTol = 1e-6;
+
+  int total = 0;
+  for (int j = 0; j < kSplit; ++j) {
+    const double theta = j * dt;
+    const std::vector<int> ids = approximator.admissibleThetaIds(theta);
+    ASSERT_FALSE(ids.empty()) << "theta index " << j;
+    const double lo = std::min(theta + kTauMin, kTMax);
+    const double hi = std::min(theta + kTauMax, kTMax);
+    for (const int id : ids) {
+      const double t = id * dt;
+      EXPECT_GE(t, lo - kTol) << "theta index " << j << ", instant " << id;
+      EXPECT_LE(t, hi + kTol) << "theta index " << j << ", instant " << id;
+    }
+    total += static_cast<int>(ids.size());
+  }
+  // Eight instants for most theta, fewer only where the horizon clamps the
+  // window. A rule that admitted nothing would pass the bounds above.
+  EXPECT_GT(total, 8 * kSplit / 2);
+}

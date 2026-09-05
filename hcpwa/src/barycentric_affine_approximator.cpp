@@ -187,7 +187,6 @@ BarycentricAffineApproximator::BarycentricAffineApproximator(
   {
     int checked = 0;
     int unreachable = 0;
-    const double half_step = t_delta_ / 2.0;
     auto covers = [&](int level, int theta_end, int t_idx) {
       const auto layer = theta_t_index_lists_.expanded_t_by_k_theta.find(level);
       if (layer == theta_t_index_lists_.expanded_t_by_k_theta.end()) {
@@ -213,7 +212,9 @@ BarycentricAffineApproximator::BarycentricAffineApproximator(
         bool reachable = false;
         for (int r = 0; r < level && !reachable; ++r) {
           for (std::size_t i = 0; i < t_range_.size() && !reachable; ++i) {
-            if (t_range_[i] >= lo - half_step && t_range_[i] <= hi + half_step
+            // Same window as admissibleThetaIds, so this count matches the
+            // candidates getBorderConditions will actually find.
+            if (t_range_[i] >= lo - kEps && t_range_[i] <= hi + kEps
                 && covers(r, static_cast<int>(i), theta_idx)) {
               reachable = true;
             }
@@ -672,14 +673,33 @@ SparseVec BarycentricAffineApproximator::buildPhiRowBlock(
 
 std::vector<int> BarycentricAffineApproximator::admissibleThetaIds(
     double theta) const {
+  // The grid Theta of admissible next switching instants: the time-grid points
+  // inside [theta + tau_min, theta + tau_max], intersected with [0, T].
+  //
+  // The interval is closed with a numerical tolerance only, NOT with a
+  // half-grid-step slack, and that distinction decides soundness rather than
+  // tightness. The transfer step certifies
+  //   Vt^(p)(theta, n) <= max_{r < p} max_{theta* in Theta} Vt^(r)(theta, n, .,
+  //   theta*),
+  // and it is a bound on V^(p) only because Theta is a SUBSET of the true
+  // window, which makes the right-hand side no larger than the maximum over
+  // the window. Admitting a theta* outside the window enlarges that maximum
+  // and weakens the condition, so the result stops being a certified lower
+  // bound. With a half-step slack that is not hypothetical: at T = 1200 on 240
+  // points, dt = 5.0209 and theta + 10 dt = theta + 50.209 was admitted for
+  // 230 of the 240 grid values of theta, against tau_max = 50.
+  //
+  // Tightening costs nothing here: every theta keeps between one and eight
+  // admissible instants, and the count of nodes with no reachable predecessor
+  // is unchanged at 230 of 12 585. A grid commensurate with the switching
+  // bounds -- t_split_count = 241, giving dt = 5 exactly with tau_min = 2 dt
+  // and tau_max = 10 dt -- removes the quantisation altogether.
   const double theta_min = std::min(theta + tau_min_, t_max_);
   const double theta_max = std::min(theta + tau_max_, t_max_);
-  const double half_step = t_delta_ / 2.0;
 
   std::vector<int> result;
   for (std::size_t i = 0; i < t_range_.size(); ++i) {
-    if (t_range_[i] >= theta_min - half_step
-        && t_range_[i] <= theta_max + half_step) {
+    if (t_range_[i] >= theta_min - kEps && t_range_[i] <= theta_max + kEps) {
       result.push_back(t_index_[i]);
     }
   }
@@ -1777,20 +1797,39 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
             z.push_back(z_terminal);
           }
 
+          // Per time layer, the integral of the estimate over Omega. Node
+          // values on their own say very little: they are the coefficients of
+          // one representation of V, and the gauge splits the same function
+          // between the planes differently from layer to layer -- a node
+          // maximum can jump sixfold between two adjacent layers while the
+          // function itself moves by a few percent. q^T z is the one statistic
+          // of z that depends on V alone, it is what the band LP maximises,
+          // and dividing by |Omega| makes it read as a mean value, comparable
+          // against the integral of the running cost.
+          const Eigen::VectorXd& q
+              = node_weights_[static_cast<std::size_t>(phase)];
+          const double omega_volume = std::pow(system_params_.N, kSpaceDim);
           for (std::size_t k = 0; k < z.size(); ++k) {
             const int t_idx = t_range_ids[k];
             value_function_.set(phase, switch_cnt, t_idx, theta_idx, z[k],
                                 static_cast<std::size_t>(
                                     layouts_[static_cast<std::size_t>(phase)]
                                         .num_x));
+            double mean_value = 0.0;
+            for (int i = 0; i < q.size(); ++i) {
+              mean_value += q(i) * z[k][static_cast<std::size_t>(i)];
+            }
+            mean_value /= omega_volume;
             auto [min_it, max_it] = std::minmax_element(z[k].begin(),
                                                         z[k].end());
             const double min_val = min_it == z[k].end() ? 0.0 : *min_it;
             const double max_val = max_it == z[k].end() ? 0.0 : *max_it;
             logger_->info(
-                "Value function min/max at t_idx: {}, theta_idx: {}, phase: "
-                "{}, switch_cnt: {}: \t{:.4f}\t{:.4f}",
-                t_idx, theta_idx, phase, switch_cnt, min_val, max_val);
+                "Value function at t_idx: {}, theta_idx: {}, phase: {}, "
+                "switch_cnt: {}: mean over Omega {:.6f}, node values in "
+                "[{:.4f}, {:.4f}]",
+                t_idx, theta_idx, phase, switch_cnt, mean_value, min_val,
+                max_val);
           }
           const std::size_t done = completed_tasks.fetch_add(1) + 1;
           logger_->info(

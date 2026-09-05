@@ -90,6 +90,29 @@ coarse_courier_options() {
   barycentric_affine_approximator::CourierBorderOptions options;
   options.certificate_tol = 1e-2;
   options.max_certificate_cache = 512;
+  // The Benders loop here is bounded by its cut budget, not by convergence:
+  // the sweep stops as soon as it has collected max_cuts_per_iteration
+  // violated regions, so the iteration count comes out as (cuts needed) /
+  // (cuts per iteration). Measured on a staged run, cuts = 2048 at iters = 5
+  // and cuts = 7168 at iters = 15 -- exactly 512 per iteration, the old
+  // budget, every time.
+  //
+  // That matters because the work per level grows: level p maximises over the
+  // estimates of every level below it at up to eight switching instants each,
+  // so its candidate count grows with p, and with it the number of regions
+  // whose courier has to be cut off. The staged run showed the scaling
+  // directly -- one candidate took three to six iterations, nine candidates
+  // took eleven to fifteen -- and at that rate the sixty-iteration cap, which
+  // is a hard failure rather than a fallback, would be reached around level
+  // five of a hundred and twenty.
+  //
+  // Both numbers below are budgets, not tolerances: a cut is a valid
+  // inequality whatever the budget, and certification still requires one
+  // complete sweep that finds no violation. Raising them buys iterations, not
+  // slack. The larger cut budget is also cheaper per unit of progress, since
+  // every iteration re-solves the master and restarts the sweep.
+  options.max_cuts_per_iteration = 4096;
+  options.max_iterations = 200;
   return options;
 }
 
@@ -156,6 +179,18 @@ TEST(common, DISABLED_barycentric_preflight) {
   }
 }
 
+// Reads an environment override, or returns the default. The defaults are the
+// production configuration; the overrides exist so the same run can be staged
+// on a smaller machine -- fewer levels, fewer workers -- without editing this
+// file and without a second code path.
+static int envInt(const char* name, int fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  return std::atoi(value);
+}
+
 TEST(common, barycentric_affine_solver) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
@@ -163,6 +198,12 @@ TEST(common, barycentric_affine_solver) {
   auto barycentric_approximator = create_barycentric_approximator();
   barycentric_approximator.setCourierOptions(coarse_courier_options());
   barycentric_approximator.setBandLpOptions(band_lp_options());
+  // Levels beyond this are skipped. The full horizon is ceil(t_max / tau_min)
+  // = 120; capping it is how a staged run is done.
+  const int max_switches = envInt("HCPWA_MAX_SWITCHES", -1);
+  if (max_switches >= 0) {
+    barycentric_approximator.setMaxSwitches(max_switches);
+  }
 
   // The default is the production machine's results tree. Overridable so the
   // same test can be run anywhere without editing it; run() throws if the
@@ -179,5 +220,5 @@ TEST(common, barycentric_affine_solver) {
           ? out
           : "/root/gitlab/hybrid-control-pwa/results/barycentric/lower/"
             "first_run/",
-      16);
+      envInt("HCPWA_THREADS", 16));
 }

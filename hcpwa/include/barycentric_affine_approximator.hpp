@@ -2,6 +2,8 @@
 #define HCPWA_BARYCENTRIC_AFFINE_APPROXIMATOR_HPP
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <stdexcept>
 #include <Eigen/Dense>
 #include <Highs.h>
 #include <algo.hpp>
@@ -209,8 +211,6 @@ class BarycentricAffineApproximator {
                              const Eigen::VectorXd& point,
                              double tolerance = kEps) const;
 
-  std::vector<int> admissibleThetaIds(double theta) const;
-
   // s of step 2.1: the single parameter separating the two approximation
   // directions after the corrections. Every row sign and the objective sign are
   // derived from it.
@@ -239,6 +239,19 @@ class BarycentricAffineApproximator {
   void setBandLpOptions(const BandLpOptions& options) {
     band_options_ = options;
   }
+
+  // Stops the recursion early, for staged debugging: level r reads only levels
+  // below it, so a run capped at r = 2 exercises every part of the machinery
+  // -- terminal family, courier border conditions, the band LP with a nonzero
+  // terminal value -- at a fraction of the cost. Can only lower the count the
+  // constructor derived from the horizon, never raise it.
+  void setMaxSwitches(int max_switches) {
+    if (max_switches < 0) {
+      throw std::invalid_argument("setMaxSwitches: negative level count");
+    }
+    max_switches_ = std::min(max_switches_, max_switches);
+  }
+  int maxSwitches() const { return max_switches_; }
   const BandLpOptions& bandLpOptions() const { return band_options_; }
 
   // Must be set before getIntersectionPoints(). Turning build_8d_vertices off
@@ -253,6 +266,12 @@ class BarycentricAffineApproximator {
   void setCourierOptions(const CourierBorderOptions& options) {
     courier_options_ = options;
   }
+
+  // The grid Theta of admissible next switching instants after theta: the
+  // time-grid points inside [theta + tau_min, theta + tau_max] intersected
+  // with [0, T]. Public because the containment of Theta in that window is
+  // what makes the transfer step a bound, and a test pins it.
+  std::vector<int> admissibleThetaIds(double theta) const;
 
   double getBetaParamForAxis(int i, int j) const;
   std::pair<double, double> getFMinMaxForAxis(int i) const;

@@ -73,8 +73,8 @@ create_barycentric_approximator() {
 //
 // certificate_tol decides both whether a region counts as violated and whether
 // a cached courier may certify it, so it drives the cost twice over. At the
-// library default the screen covered 1 117 regions out of 1.12 million -- 0.1%
-// -- and every sweep was 1.12 million subproblem LPs, 210 seconds each, with a
+// library default the screen covered a thousand regions out of the million-odd
+// this geometry has, and every sweep was one subproblem LP per region, with a
 // dozen sweeps per border condition. Loosening it lets one courier stand in for
 // many neighbouring regions, which is what made the N=100 run finish in four
 // iterations.
@@ -90,13 +90,38 @@ coarse_courier_options() {
   return options;
 }
 
+// One band LP per (level, theta) node covers all the time points of that node
+// at once (problem lp_horizon), so this run solves about 12 400 LPs per phase
+// rather than the 107 000 one-step LPs the greedy march needed. The grid below
+// gives 93% of those nodes nine stages, which on this arrangement is roughly
+// 59 000 rows by 12 900 columns and 7 s of interior point.
+static barycentric_affine_approximator::BandLpOptions band_lp_options() {
+  barycentric_affine_approximator::BandLpOptions options;
+  // A node that stops converging must not hold a worker for the rest of the
+  // run: at this size the honest solve is 7 s, so this is forty times out of
+  // the way of one. What comes back at the limit is kept only if it is primal
+  // feasible -- the rows are the statement s * F <= 0, so such a point is a
+  // coarser bound rather than a wrong one -- and the exact worst residual is
+  // re-derived from the formulas afterwards either way. The other solver of
+  // the ladder gets its own attempt first.
+  options.time_limit = 300.0;
+  return options;
+}
+
 TEST(common, barycentric_affine_solver) {
   auto barycentric_approximator = create_barycentric_approximator();
   barycentric_approximator.setCourierOptions(coarse_courier_options());
+  barycentric_approximator.setBandLpOptions(band_lp_options());
 
   // The default is the production machine's results tree. Overridable so the
   // same test can be run anywhere without editing it; run() throws if the
   // directory does not exist, which is the whole failure on any other host.
+  //
+  // The thread count is now just the size of the pool over (level, theta,
+  // phase) nodes -- it no longer has to be even, because there is no per-phase
+  // solver to split it between. Each worker builds its own band LP and its own
+  // HiGHS; measured peak resident set for one nine-stage solve, geometry
+  // included, is 330 MB, so sixteen of them is an upper bound of about 5 GB.
   const char* out = std::getenv("HCPWA_RESULTS_DIR");
   barycentric_approximator.run(
       out != nullptr

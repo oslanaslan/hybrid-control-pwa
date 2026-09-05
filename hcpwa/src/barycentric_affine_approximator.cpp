@@ -6,6 +6,7 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <Highs.h>
+#include <lp_data/HighsModelUtils.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -39,8 +40,6 @@ namespace {
 // barycentric LP is meant to reuse the same solver configuration and update only
 // RHS bounds between backward time steps.
 constexpr double kHighsSolutionTol = 1e-6;
-constexpr double kHighsSmallMatrixValue = 1e-9;
-constexpr double kHighsPdlpOptimalityTol = 1e-6;
 
 // How much primal infeasibility a non-optimal HiGHS point may carry and still
 // be accepted by solveLp(). Row units here are the same units as the residual
@@ -52,9 +51,11 @@ constexpr double kHighsPdlpOptimalityTol = 1e-6;
 constexpr double kLpPrimalFeasibilityLimit
     = barycentric_affine_approximator::kResidualValidationTol;
 
-// Cap on simplex iterations for one reduced LP. See the comment at the option
-// itself for the measurement behind the number.
-constexpr int kLpSimplexIterationLimit = 400000;
+// How far a terminal node value may sit from zero on a gauge-pinned column.
+// The border problem fixes those columns to exactly zero and level 0 hands
+// over zeros, so anything measurable here means the two LPs were normalised
+// differently, and the node would be infeasible by its column bounds.
+constexpr double kGaugePinTol = 1e-9;
 
 // Converts hcpwa::Vec<2> to Eigen::Vector2d. Keeping this tiny conversion helper
 // avoids mixing two vector APIs inside the indexing-heavy barycentric code.
@@ -965,8 +966,6 @@ void BarycentricAffineApproximator::buildReducedLpInput(int phase) {
   input.num_x = layout.num_x;
   input.t_delta = t_delta_;
   input.sign_s = signS();
-  input.weights = objective_weights_;
-  input.tie_break_eps = tie_break_eps_;
   input.blocks.resize(kBlockCount);
 
   for (int b = 0; b < kBlockCount; ++b) {
@@ -1055,29 +1054,6 @@ void BarycentricAffineApproximator::buildReducedLpInput(int phase) {
       = block_reduction::makeReducedLpRowLayout(reduced_inputs_[phase]);
 }
 
-block_reduction::ReducedLpMatrices
-BarycentricAffineApproximator::prepareLpMatrices(int phase) const {
-  block_reduction::ReducedLpMatrices matrices
-      = block_reduction::assembleReducedLp(reduced_inputs_[phase]);
-
-  double product_rows = 1.0;
-  for (const auto& block : reduced_inputs_[phase].blocks) {
-    double pairs = 0.0;
-    for (const auto& region : block.regions) {
-      pairs += static_cast<double>(region.vertices.size());
-    }
-    product_rows *= pairs;
-  }
-  logger_->info(
-      "prepareLpMatrices: phase={}, rows={}, cols={}, nnz={}, block regions="
-      "{}/{}/{}, product form would have needed {:.3e} residual rows",
-      phase, matrices.rows.num_rows, matrices.cols.num_cols,
-      matrices.value.size(), reduced_cols_[phase].num_regions[0],
-      reduced_cols_[phase].num_regions[1], reduced_cols_[phase].num_regions[2],
-      2.0 * product_rows);
-  return matrices;
-}
-
 std::vector<double> BarycentricAffineApproximator::getBorderConditions(
     int switch_phase, int theta_idx, double theta, int switch_cnt) const {
   // The run loop keeps the historical "switch_phase" name from the global
@@ -1164,10 +1140,19 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   }
   const int n_candidates = static_cast<int>(candidates.size());
 
+  // The gauge normalisation of the band LP this node value will be the
+  // terminal condition of: the master fixes the same columns, so what comes
+  // back obeys the band LP's column bounds (the paper: the conditions must be
+  // imposed identically in every problem sharing a set of node values).
+  const std::vector<int> pins
+      = gauge_fixes_[static_cast<std::size_t>(target_phase)].pinsForLevel(
+          switch_cnt);
+
   CourierBorderRequest request;
   request.target_phase = target_phase;
   request.source_phase = source_phase;
   request.candidates = std::span<const std::vector<double>>(candidates);
+  request.pinned_columns = std::span<const int>(pins);
   request.theta_idx = theta_idx;
   request.switch_cnt = switch_cnt;
 
@@ -1200,287 +1185,290 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   return x_boundary;
 }
 
-std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
-BarycentricAffineApproximator::initializeHighs(int phase) {
-  const block_reduction::ReducedLpMatrices matrices = prepareLpMatrices(phase);
-  const auto& layout = layouts_[phase];
-  const int m = matrices.rows.num_rows;
-  const int n = matrices.cols.num_cols;
-
-  std::unique_ptr<Highs> highs = std::make_unique<Highs>();
-  highs->setOptionValue("solver", "simplex");
-  highs->setOptionValue("presolve", "on");
-  highs->setOptionValue("simplex_strategy", 2);
-  highs->setOptionValue("pdlp_optimality_tolerance", kHighsPdlpOptimalityTol);
-  highs->setOptionValue("kkt_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("primal_residual_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("dual_residual_tolerance", kHighsSolutionTol);
-  highs->setOptionValue("optimality_tolerance", kHighsSolutionTol);
-  // Same constant the assembler checks emitted rho entries against: HiGHS drops
-  // matrix entries at or below it, and a dropped rho would weaken row (L).
-  highs->setOptionValue("small_matrix_value",
-                        block_reduction::kSmallMatrixValue);
-  // A cycling LP has to end. One step-4 solve ran 3.8 million simplex
-  // iterations over twenty-three minutes with the objective oscillating
-  // between exactly two values, 3.9329410965e+10 and 3.9329380573e+10, and the
-  // primal infeasibility pinned at exactly 1.52588e-05 -- degenerate cycling,
-  // not slow progress. The worst honest solve in the same run took 78403
-  // iterations, so this cap is five times that: far out of the way of a
-  // genuine solve, and about two minutes for one that has stopped moving.
+double BarycentricAffineApproximator::validateBandResiduals(
+    int phase, const std::vector<std::vector<double>>& z) const {
+  // The exact worst residual of every stage over the whole product of regions
+  // and vertices. The residual is additively separable over the three blocks,
+  // so the maximum over the product is the sum of the per-block maxima -- the
+  // true global worst case, not a sample of it, at O(sum_b R_b) per stage.
   //
-  // What comes back at the cap is handled by solveLp: a primal-feasible point
-  // is accepted as a coarser bound, anything else is fatal.
-  highs->setOptionValue("simplex_iteration_limit", kLpSimplexIterationLimit);
-  highs->setOptionValue("log_to_console", highs_verbose_);
-
-  // The objective is the l1 norm of the residuals measured at the endpoint with
-  // the known value, and it is minimized in both directions: the sign s is
-  // already baked into the cost by the assembler (step 2.1, section 5).
-  highs->changeObjectiveSense(ObjSense::kMinimize);
-
-  // Normalize the cost vector to max |c| = 1. This is an exact reformulation:
-  // dividing a linear objective by a positive constant leaves the feasible set
-  // and the optimal face untouched. It is needed because the R/R_b weights put
-  // raw costs in [1e+05, 2e+06] and objective values near 1e+17, while HiGHS
-  // judges dual feasibility with an *absolute* tolerance on reduced costs. At
-  // that scale the test is meaningless: a solve with a relative dual error of
-  // 1e-10 was reported with 3e-04 of dual infeasibility and downgraded from
-  // Optimal to Unknown, which used to abort the run. Same treatment the courier
-  // master LP already gets.
-  std::vector<double> cost(matrices.cost.data(),
-                           matrices.cost.data() + matrices.cost.size());
-  double objective_scale = 0.0;
-  for (const double c : cost) {
-    objective_scale = std::max(objective_scale, std::abs(c));
-  }
-  if (!(objective_scale > 0.0) || !std::isfinite(objective_scale)) {
-    throw std::runtime_error(
-        "initializeHighs: objective is all zero or not finite");
-  }
-  for (double& c : cost) {
-    c /= objective_scale;
-  }
-  objective_scales_[static_cast<std::size_t>(phase)] = objective_scale;
-
-  // y >= 0 and u >= 0 come from the assembler. Gauge fixing is ours: it removes
-  // the additive nullspace between the five projected layers. Do not fix layer
-  // 0; layers 1..4 get their first vertex pinned to 0.
-  std::vector<double> col_lower = matrices.col_lower;
-  std::vector<double> col_upper = matrices.col_upper;
-  for (int s = 1; s < kSubsystemCount; ++s) {
-    if (layout.eta_s[s] == 0) {
-      throw std::runtime_error("initializeHighs: empty projection layer");
+  //   F^L = phi^T d + (Psi_j z_k)^T m     + s rho^T |Psi_j z_k|     + g(nu)
+  //   F^R = phi^T d + (Psi_j z_{k+1})^T m + s rho^T |Psi_j z_{k+1}| + g(nu)
+  //   d   = (z_{k+1} - z_k) / dt
+  // Both must satisfy s * F <= 0 on every stage: F >= 0 for the lower bound
+  // (s = -1) and F <= 0 for the upper one (s = +1). This is the statement
+  // that the constructed function is a bound (theorem on the optimality of
+  // the band LP, part 1), re-derived from the formulas rather than read off
+  // the solver.
+  const std::vector<block_reduction::WorstResidual> residuals
+      = block_reduction::bandStageResiduals(
+          reduced_inputs_[static_cast<std::size_t>(phase)], z);
+  double worst = -std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k < residuals.size(); ++k) {
+    const block_reduction::WorstResidual& r = residuals[k];
+    const double limit
+        = kResidualValidationTol + kResidualValidationRelTol * r.scale;
+    if (r.worst() > limit) {
+      throw std::runtime_error(std::format(
+          "validateBandResiduals: stage {} of {}: residual has the wrong "
+          "sign, worst s*F = {} (left {}, right {}) against a limit of {} for "
+          "terms of size {}",
+          k, residuals.size(), r.worst(), r.left, r.right, limit, r.scale));
     }
-    const int col = layout.idxX(s, 0);
-    col_lower[static_cast<std::size_t>(col)] = 0.0;
-    col_upper[static_cast<std::size_t>(col)] = 0.0;
+    worst = std::max(worst, r.worst());
   }
-
-  HighsStatus st = highs->addCols(
-      n, cost.data(), col_lower.data(), col_upper.data(),
-      /*num_nz=*/0, /*start=*/nullptr, /*index=*/nullptr, /*value=*/nullptr);
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("initializeHighs: highs.addCols failed.");
-  }
-
-  st = highs->addRows(m, matrices.row_lower.data(), matrices.row_upper.data(),
-                      static_cast<int>(matrices.value.size()),
-                      matrices.starts.data(), matrices.col_index.data(),
-                      matrices.value.data());
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("initializeHighs: highs.addRows failed.");
-  }
-
-  // Zero warm start is compatible with gauge-fixed x columns and y >= 0. The
-  // solver may still need to find feasibility, but the initial values obey all
-  // simple column bounds.
-  HighsSolution initial_solution;
-  initial_solution.value_valid = true;
-  initial_solution.col_value.assign(n, 0.0);
-  st = highs->setSolution(initial_solution);
-  if (st != HighsStatus::kOk) {
-    throw std::runtime_error("initializeHighs: highs.setSolution failed.");
-  }
-
-  return std::make_tuple(std::move(highs), matrices.row_lower,
-                         matrices.row_upper);
+  return worst;
 }
 
-void BarycentricAffineApproximator::updateHighsRhsUpperBounds(
-    int phase, int solver_index, const std::vector<double>& x_next) {
-  // Only the residual row upper bounds depend on x_next; absolute-value rows,
-  // the two coupling rows and the column bounds are static. The formulas live
-  // next to the row builder in block_reduction_lp.cpp precisely because the two
-  // have to agree on the row scale.
-  const auto& layout = layouts_[phase];
-  if (x_next.size() != static_cast<std::size_t>(layout.num_x)) {
-    throw std::invalid_argument("updateHighsRhsUpperBounds: x_next size must be "
-                                + std::to_string(layout.num_x));
+std::vector<std::vector<double>> BarycentricAffineApproximator::solveBandLp(
+    int phase, int switch_cnt, int num_stages,
+    const std::vector<double>& z_terminal, BandSolveStats* stats) const {
+  if (phase < 0 || phase >= kPhases) {
+    throw std::invalid_argument("solveBandLp: invalid phase");
   }
-
-  const auto& row_lower = row_lowers_[solver_index];
-  const std::vector<double> new_row_upper
-      = block_reduction::updateReducedLpRowUpper(
-          reduced_inputs_[phase], reduced_rows_[phase],
-          row_uppers_[solver_index], x_next);
-
-  auto& highs_solver = highs_solvers_[solver_index];
-  std::vector<int> row_ids(new_row_upper.size());
-  std::iota(row_ids.begin(), row_ids.end(), 0);
-  // kWarning here too: changing bounds draws the same scaling advisories, and
-  // the bounds that were actually installed are verified by the residual check
-  // after the solve.
-  const HighsStatus st = highs_solver->changeRowsBounds(
-      static_cast<int>(row_ids.size()), row_ids.data(), row_lower.data(),
-      new_row_upper.data());
-  if (st == HighsStatus::kError) {
+  if (num_stages < 1) {
+    throw std::invalid_argument("solveBandLp: num_stages must be >= 1");
+  }
+  const block_reduction::ReducedLpInput& input
+      = reduced_inputs_[static_cast<std::size_t>(phase)];
+  const int num_x = layouts_[static_cast<std::size_t>(phase)].num_x;
+  if (input.num_x != num_x || input.blocks.empty()) {
     throw std::runtime_error(
-        "updateHighsRhsUpperBounds: highs.changeRowsBounds failed.");
+        "solveBandLp: block data not built; call precomputeMatrices() first");
   }
-}
+  if (static_cast<int>(z_terminal.size()) != num_x) {
+    throw std::invalid_argument("solveBandLp: z_terminal must have "
+                                + std::to_string(num_x) + " entries");
+  }
 
-std::vector<double> BarycentricAffineApproximator::solveLp(
-    int phase, int solver_index) {
-  // Solves the current reused HiGHS model and extracts only x_k. The auxiliary
-  // y_j block is a proof/linearization device and is not part of the value
-  // function stored for later time steps.
-  auto& highs_solver = highs_solvers_[solver_index];
-  const HighsStatus run_status = highs_solver->run();
-  // kWarning is advisory and does not mean the solve failed. HiGHS returns it
-  // for the scaling notes this LP always draws -- "excessively large costs" for
-  // the R/R_b objective weights, "excessively small row bounds" for residual
-  // bounds near zero -- while reporting Optimal with a primal-dual objective
-  // error of 1e-16. Treating it as failure discarded an hour of work over a
-  // perfectly solved LP.
-  //
-  // What actually has to hold is checked twice below: the model status, and
-  // then validateStepResiduals, which recomputes s * F from the formulas and
-  // is the statement that the result is a bound.
-  if (run_status == HighsStatus::kError) {
-    throw std::runtime_error("solveLp: highs_solver.run() returned an error");
+  const std::vector<int> pins
+      = gauge_fixes_[static_cast<std::size_t>(phase)].pinsForLevel(switch_cnt);
+  for (const int col : pins) {
+    if (std::abs(z_terminal[static_cast<std::size_t>(col)]) > kGaugePinTol) {
+      throw std::runtime_error(std::format(
+          "solveBandLp: phase {} level {}: the terminal node value is {} on "
+          "gauge-pinned column {}; the border problem and the band LP are "
+          "normalised differently",
+          phase, switch_cnt, z_terminal[static_cast<std::size_t>(col)], col));
+    }
   }
-  const HighsModelStatus model_status = highs_solver->getModelStatus();
-  const HighsInfo& info = highs_solver->getInfo();
-  if (model_status != HighsModelStatus::kOptimal) {
-    // kUnknown means HiGHS solved the LP but would not certify the point
-    // against its own tolerances -- in every observed case because of dual
-    // infeasibility, that is, reduced costs of the wrong sign. Read what that
-    // does and does not cost us.
-    //
-    // Soundness of the step rests on *primal* feasibility alone: the rows are
-    // exactly the statement s * F <= 0 at every vertex of every region, so any
-    // primal-feasible z yields a valid bound. Dual feasibility is the
-    // certificate of *optimality*, and losing it means only that the bound may
-    // be looser than the best one this LP admits -- a coarser estimate, not a
-    // wrong one. Accepting it is therefore a tightness relaxation, never a
-    // structural one, and validateStepResiduals re-derives s * F from the
-    // formulas right after this returns, so the bound property is checked
-    // independently of anything HiGHS asserts.
-    //
-    // Anything else -- Infeasible, Unbounded, a solve error -- is fatal: those
-    // carry no usable primal point at all.
-    // kIterationLimit joins kUnknown here for the same reason and on the same
-    // terms. Both hand back a point the solver would not certify -- one
-    // because it ran out of the budget above, the other because it could not
-    // meet its own tolerances -- and in both cases what decides whether the
-    // step is usable is primal feasibility, checked below and then re-derived
-    // from the formulas by validateStepResiduals.
+
+  const auto started_at = std::chrono::steady_clock::now();
+
+  block_reduction::BandLpInput band;
+  band.stage = &input;
+  band.num_stages = num_stages;
+  band.z_terminal = z_terminal;
+  band.node_weights = node_weights_[static_cast<std::size_t>(phase)];
+  band.pinned_columns = pins;
+  const block_reduction::BandLpMatrices lp = block_reduction::assembleBandLp(band);
+
+  // The model, once; every attempt gets its own copy.
+  HighsLp model;
+  model.num_col_ = lp.cols.num_cols;
+  model.num_row_ = lp.rows.num_rows;
+  // Normalised to max |c| = 1. Dividing a linear objective by a positive
+  // constant is an exact reformulation -- same feasible set, same optimal
+  // face -- and it is needed because the node weights carry N^6 and HiGHS
+  // judges dual feasibility with an absolute tolerance on the reduced costs.
+  model.col_cost_.assign(lp.cost.data(), lp.cost.data() + lp.cost.size());
+  for (double& c : model.col_cost_) {
+    c /= lp.cost_scale;
+  }
+  model.col_lower_ = lp.col_lower;
+  model.col_upper_ = lp.col_upper;
+  model.row_lower_ = lp.row_lower;
+  model.row_upper_ = lp.row_upper;
+  model.a_matrix_.format_ = MatrixFormat::kRowwise;
+  model.a_matrix_.num_col_ = lp.cols.num_cols;
+  model.a_matrix_.num_row_ = lp.rows.num_rows;
+  model.a_matrix_.start_ = lp.starts;
+  model.a_matrix_.index_ = lp.col_index;
+  model.a_matrix_.value_ = lp.value;
+  model.sense_ = ObjSense::kMinimize;
+
+  // The ladder: the configured solver first, the other one if that did not
+  // reach an optimal point. Both run single-threaded -- the run loop already
+  // parallelises over nodes, and a parallel simplex on every worker would
+  // oversubscribe the machine.
+  struct Attempt {
+    const char* solver;
+    bool crossover;
+  };
+  std::vector<Attempt> ladder;
+  if (band_options_.solver == "ipm") {
+    ladder.push_back({"ipm", band_options_.run_crossover});
+    ladder.push_back({"simplex", false});
+  } else if (band_options_.solver == "simplex") {
+    ladder.push_back({"simplex", false});
+    ladder.push_back({"ipm", true});
+  } else {
+    throw std::invalid_argument("solveBandLp: unknown solver \""
+                                + band_options_.solver + "\"");
+  }
+
+  std::unique_ptr<Highs> best;
+  const Attempt* best_attempt = nullptr;
+  HighsModelStatus best_status = HighsModelStatus::kNotset;
+  HighsModelStatus last_status = HighsModelStatus::kNotset;
+  for (const Attempt& attempt : ladder) {
+    auto highs = std::make_unique<Highs>();
+    highs->setOptionValue("output_flag", highs_verbose_);
+    highs->setOptionValue("log_to_console", highs_verbose_);
+    highs->setOptionValue("presolve", "on");
+    // Not "threads": HiGHS refuses that once its global scheduler has been
+    // initialised with another count by any earlier instance in the process,
+    // and run() then fails outright. parallel=off keeps this instance
+    // single-threaded whatever the scheduler was started with.
+    highs->setOptionValue("parallel", "off");
+    highs->setOptionValue("solver", attempt.solver);
+    highs->setOptionValue("run_crossover", attempt.crossover ? "on" : "off");
+    // Dual simplex: the rows outnumber the columns many times over.
+    highs->setOptionValue("simplex_strategy", 1);
+    highs->setOptionValue("simplex_iteration_limit",
+                          band_options_.simplex_iteration_limit);
+    highs->setOptionValue("ipm_iteration_limit",
+                          band_options_.ipm_iteration_limit);
+    highs->setOptionValue("time_limit", band_options_.time_limit);
+    highs->setOptionValue("primal_feasibility_tolerance", kHighsSolutionTol);
+    highs->setOptionValue("dual_feasibility_tolerance", kHighsSolutionTol);
+    // Same constant the assembler checks emitted rho entries against: HiGHS
+    // drops matrix entries at or below it, and a dropped rho would weaken a
+    // row (L).
+    highs->setOptionValue("small_matrix_value",
+                          block_reduction::kSmallMatrixValue);
+    if (highs->passModel(model) != HighsStatus::kOk) {
+      throw std::runtime_error("solveBandLp: highs.passModel failed");
+    }
+
+    // kWarning is advisory: HiGHS returns it for scaling notes while reporting
+    // Optimal with a primal-dual objective error of 1e-16. What actually has
+    // to hold is checked below by the model status and then by
+    // validateBandResiduals.
+    const HighsStatus run_status = highs->run();
+    if (run_status == HighsStatus::kError) {
+      logger_->warn("solveBandLp: phase={} level={} stages={}: {} returned "
+                    "an error status; trying the next solver",
+                    phase, switch_cnt, num_stages, attempt.solver);
+      continue;
+    }
+    const HighsModelStatus status = highs->getModelStatus();
+    last_status = status;
+    if (status == HighsModelStatus::kOptimal) {
+      best = std::move(highs);
+      best_attempt = &attempt;
+      best_status = status;
+      break;
+    }
+    // Soundness of the node rests on *primal* feasibility alone: the rows are
+    // exactly the statement s * F <= 0 at every vertex of every region on
+    // every stage, so any primal-feasible point yields a valid bound. Dual
+    // feasibility is the certificate of *optimality*, and losing it means only
+    // that the bound may be looser than the best one this LP admits -- a
+    // coarser estimate, not a wrong one. A point the solver would not certify
+    // for lack of budget (iterations, time) or tolerance (kUnknown) is
+    // therefore kept as a fallback, but the other solver gets its try first.
+    // Infeasible, Unbounded, a solve error carry no usable point at all.
+    const HighsInfo& info = highs->getInfo();
     const bool budget_or_tolerance
-        = model_status == HighsModelStatus::kUnknown
-          || model_status == HighsModelStatus::kIterationLimit;
+        = status == HighsModelStatus::kUnknown
+          || status == HighsModelStatus::kIterationLimit
+          || status == HighsModelStatus::kTimeLimit;
     const bool primal_feasible
         = budget_or_tolerance
           && info.primal_solution_status == kSolutionStatusFeasible
           && info.max_primal_infeasibility <= kLpPrimalFeasibilityLimit;
-    if (!primal_feasible) {
-      throw std::runtime_error(
-          "solveLp: LP solution not found for solver_index "
-          + std::to_string(solver_index) + ", model status: "
-          + std::to_string(static_cast<int>(model_status))
-          + ", primal solution status: "
-          + std::to_string(static_cast<int>(info.primal_solution_status))
-          + ", max primal infeasibility: "
-          + std::to_string(info.max_primal_infeasibility));
-    }
     logger_->warn(
-        "solveLp: solver_index {} accepted a primal-feasible non-optimal "
-        "point (model status {}, max primal infeasibility {:.3e}, {} dual "
-        "infeasibilities up to {:.3e}); the bound for this step may be looser "
-        "than optimal",
-        solver_index, static_cast<int>(model_status),
-        info.max_primal_infeasibility, info.num_dual_infeasibilities,
-        info.max_dual_infeasibility);
-  }
-
-  const auto& solution = highs_solver->getSolution();
-  const int num_x = layouts_[phase].num_x;
-  if (solution.col_value.size() < static_cast<std::size_t>(num_x)) {
-    throw std::runtime_error("solveLp: HiGHS solution is too short.");
-  }
-
-  // The snapshot the column layout was built from, not the live member: the u
-  // block exists only when buildReducedLpInput() saw a positive value, so
-  // reading tie_break_eps_ here would make a later setTieBreakEps() throw out
-  // of idxU from inside a diagnostic.
-  const double tie_break_eps = reduced_inputs_[phase].tie_break_eps;
-  if (tie_break_eps > 0.0) {
-    // The two halves of the objective, reported apart: the l1 residual norm is
-    // what the method minimizes, and the eps * ||z||_1 term only picks one
-    // point out of an optimal face. If the second is not far smaller than the
-    // first, the regularization is no longer a tie-break.
-    double regularizer = 0.0;
-    const auto& cols = reduced_cols_[phase];
-    for (int k = 0; k < num_x; ++k) {
-      regularizer += tie_break_eps
-                     * solution.col_value[static_cast<std::size_t>(
-                         cols.idxU(k))];
+        "solveBandLp: phase={} level={} stages={}: {} ended with model "
+        "status {} ({}), primal solution status {}, max primal infeasibility "
+        "{:.3e}; {}",
+        phase, switch_cnt, num_stages, attempt.solver, static_cast<int>(status),
+        utilModelStatusToString(status),
+        static_cast<int>(info.primal_solution_status),
+        info.max_primal_infeasibility,
+        primal_feasible ? "kept as a fallback, trying the next solver"
+                        : "unusable, trying the next solver");
+    if (primal_feasible && !best) {
+      best = std::move(highs);
+      best_attempt = &attempt;
+      best_status = status;
     }
-    logger_->info(
-        "solveLp: phase={}, residual objective {:.6e}, tie-break term {:.6e}",
-        phase,
-        highs_solver->getInfo().objective_function_value
-            * objective_scales_[static_cast<std::size_t>(phase)]
-            - regularizer,
-        regularizer);
   }
-
-  return std::vector<double>(solution.col_value.begin(),
-                             solution.col_value.begin() + num_x);
-}
-
-void BarycentricAffineApproximator::validateStepResiduals(
-    int phase, const std::vector<double>& x_next,
-    const std::vector<double>& z) const {
-  // The exact worst residual over the whole product of regions and vertices.
-  // The residual is additively separable over the three blocks, so the maximum
-  // over the product is the sum of the per-block maxima -- this is the true
-  // global worst case, not a sample of it, and it costs O(sum_b R_b).
-  //
-  //   F^L = phi^T d + (Psi_j z)^T m      + s rho^T |Psi_j z|      + g(nu)
-  //   F^R = phi^T d + (Psi_j x_next)^T m + s rho^T |Psi_j x_next| + g(nu)
-  //   d   = (x_next - z) / dt
-  // Both must satisfy s * F <= 0: F >= 0 for the lower bound (s = -1) and
-  // F <= 0 for the upper one (s = +1).
-  const block_reduction::WorstResidual worst
-      = block_reduction::worstReducedResidual(reduced_inputs_[phase], x_next,
-                                              z);
-  const double limit
-      = kResidualValidationTol + kResidualValidationRelTol * worst.scale;
-  if (worst.worst() > limit) {
+  if (!best) {
+    std::string hint;
+    if (last_status == HighsModelStatus::kUnbounded
+        || last_status == HighsModelStatus::kUnboundedOrInfeasible) {
+      // Every feasible point is a certified bound, so its integral is bounded
+      // by the value function's; an unbounded objective can only come from a
+      // null direction of the parametrisation the pins did not remove.
+      hint = "; an unbounded band LP means the gauge normalisation left a null "
+             "direction, see GaugeFix";
+    }
     throw std::runtime_error(std::format(
-        "validateStepResiduals: residual has the wrong sign, worst s*F = {} "
-        "(left {}, right {}) against a limit of {} for terms of size {}",
-        worst.worst(), worst.left, worst.right, limit, worst.scale));
+        "solveBandLp: phase {} level {} stages {}: no solver produced a "
+        "usable point, last model status {} ({}){}",
+        phase, switch_cnt, num_stages, static_cast<int>(last_status),
+        utilModelStatusToString(last_status), hint));
   }
-}
+  if (best_status != HighsModelStatus::kOptimal) {
+    const HighsInfo& info = best->getInfo();
+    logger_->warn(
+        "solveBandLp: phase={} level={} stages={}: accepted a primal-feasible "
+        "non-optimal point from {} (model status {}, max primal infeasibility "
+        "{:.3e}, {} dual infeasibilities up to {:.3e}); the bound for this "
+        "node may be looser than optimal",
+        phase, switch_cnt, num_stages, best_attempt->solver,
+        static_cast<int>(best_status), info.max_primal_infeasibility,
+        info.num_dual_infeasibilities, info.max_dual_infeasibility);
+  }
 
-std::vector<double> BarycentricAffineApproximator::solveMainLpStep(
-    int phase, int solver_index, const std::vector<double>& x_next) {
-  updateHighsRhsUpperBounds(phase, solver_index, x_next);
-  std::vector<double> z = solveLp(phase, solver_index);
-  validateStepResiduals(phase, x_next, z);
+  const HighsSolution& solution = best->getSolution();
+  if (solution.col_value.size() < static_cast<std::size_t>(lp.cols.num_cols)) {
+    throw std::runtime_error("solveBandLp: HiGHS solution is too short");
+  }
+  std::vector<std::vector<double>> z;
+  z.reserve(static_cast<std::size_t>(num_stages) + 1);
+  for (int k = 0; k < num_stages; ++k) {
+    std::vector<double> z_k(static_cast<std::size_t>(num_x));
+    for (int i = 0; i < num_x; ++i) {
+      z_k[static_cast<std::size_t>(i)]
+          = solution.col_value[static_cast<std::size_t>(lp.cols.idxX(k, i))];
+    }
+    z.push_back(std::move(z_k));
+  }
+  z.push_back(z_terminal);
+
+  const double worst = validateBandResiduals(phase, z);
+
+  if (stats != nullptr) {
+    const HighsInfo& info = best->getInfo();
+    stats->stages = num_stages;
+    stats->rows = lp.rows.num_rows;
+    stats->cols = lp.cols.num_cols;
+    stats->nnz = static_cast<long long>(lp.value.size());
+    stats->solver = best_attempt->solver;
+    stats->model_status = static_cast<int>(best_status);
+    stats->accepted_non_optimal = best_status != HighsModelStatus::kOptimal;
+    stats->iterations = static_cast<long long>(info.simplex_iteration_count)
+                        + info.ipm_iteration_count
+                        + info.crossover_iteration_count;
+    stats->seconds = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - started_at)
+                         .count();
+    // The objective is a pure linear form in z with no constant term, so
+    // undoing the normalisation is exact.
+    stats->objective = info.objective_function_value * lp.cost_scale;
+    stats->integral = block_reduction::bandIntegral(
+        node_weights_[static_cast<std::size_t>(phase)], t_delta_, z);
+    stats->worst_residual = worst;
+    double limit = 0.0;
+    for (const block_reduction::WorstResidual& r :
+         block_reduction::bandStageResiduals(input, z)) {
+      limit = std::max(limit, kResidualValidationTol
+                                  + kResidualValidationRelTol * r.scale);
+    }
+    stats->residual_limit = limit;
+  }
   return z;
 }
 
@@ -1629,6 +1617,36 @@ void BarycentricAffineApproximator::precomputeMatrices() {
     validateBlockDecomposition(phase);
     buildReducedLpInput(phase);
 
+    // The gauge normalisation, from the geometry, checked against the kernel
+    // of the assembled rows. A failure here is fatal: an LP with a null
+    // direction is degenerate for the simplex and unbounded in its solution
+    // set for the interior point.
+    gauge_fixes_[static_cast<std::size_t>(phase)] = buildGaugeFix(
+        phase_geometries_[static_cast<std::size_t>(phase)],
+        layouts_[static_cast<std::size_t>(phase)], phase);
+    const GaugeFixReport gauge_report = verifyGaugeFix(
+        gauge_fixes_[static_cast<std::size_t>(phase)],
+        reduced_inputs_[static_cast<std::size_t>(phase)],
+        layouts_[static_cast<std::size_t>(phase)]);
+    {
+      const GaugeFix& gauge = gauge_fixes_[static_cast<std::size_t>(phase)];
+      std::string xi_text;
+      for (const GaugeFix::Pair& pair : gauge.pairs) {
+        xi_text += std::format(" planes {}/{} share coordinate {} on {} edge "
+                               "lines;",
+                               pair.layer_plus, pair.layer_minus,
+                               pair.shared_coord, pair.xi.size());
+      }
+      logger_->info(
+          "precomputeMatrices: phase={} gauge:{} kernel dimension {} "
+          "(singular values {:.2e} kept / {:.2e} dropped), {} line pins + {} "
+          "constant pins at r >= 1, {} line pins + {} block-C nodes at r = 0",
+          phase, xi_text, gauge_report.kernel_dim,
+          gauge_report.sigma_min_kept, gauge_report.sigma_max_dropped,
+          gauge.line_pins.size(), gauge.constant_pins.size(),
+          gauge.line_pins.size(), gauge.group_c_columns.size());
+    }
+
     double product_regions = 1.0;
     std::size_t block_pairs = 0;
     double product_pairs = 1.0;
@@ -1644,11 +1662,11 @@ void BarycentricAffineApproximator::precomputeMatrices() {
     logger_->info(
         "precomputeMatrices: phase={}, block regions={}/{}/{} (product "
         "{:.3e}), block (region, vertex) pairs={} (product {:.3e}), "
-        "num_x={}, num_cols={}",
+        "num_x={}, one stage of the band LP is {} rows x {} cols",
         phase, reduced_cols_[phase].num_regions[0],
         reduced_cols_[phase].num_regions[1],
         reduced_cols_[phase].num_regions[2], product_regions, block_pairs,
-        product_pairs, layouts_[phase].num_x,
+        product_pairs, layouts_[phase].num_x, reduced_rows_[phase].num_rows,
         reduced_cols_[phase].num_cols);
   }
   logger_->info("Finished barycentric precomputeMatrices");
@@ -1656,9 +1674,8 @@ void BarycentricAffineApproximator::precomputeMatrices() {
 
 void BarycentricAffineApproximator::run(const std::string& output_folder_path,
                                         int n_threads) {
-  // Follows the global affine structure: geometry once, one HiGHS model per
-  // (phase, worker) reused across the whole backward march, and only row bounds
-  // updated inside it. Both the main LP and the border LP are implemented.
+  // Geometry once, then level by level: for every (theta, phase) node the
+  // border condition at theta and one band LP over the time points before it.
   const std::filesystem::path out_path(output_folder_path);
   if (!std::filesystem::exists(out_path)
       || !std::filesystem::is_directory(out_path)) {
@@ -1666,10 +1683,9 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
         "output_folder_path does not exist or is not a directory: "
         + output_folder_path);
   }
-  if (n_threads < 2 || n_threads % 2 != 0) {
-    throw std::runtime_error(
-        "n_threads must be at least 2 and even. Provided n_threads: "
-        + std::to_string(n_threads));
+  if (n_threads < 1) {
+    throw std::runtime_error("n_threads must be at least 1. Provided n_threads: "
+                             + std::to_string(n_threads));
   }
 
   logger_->info("Starting barycentric affine approximator");
@@ -1687,38 +1703,9 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
 
   precomputeMatrices();
 
-  logger_->info("Start initializing Highs solvers");
-  highs_solvers_.clear();
-  row_lowers_.clear();
-  row_uppers_.clear();
-  solver_mutexes_.clear();
-
-  const int solvers_per_phase = n_threads / 2;
-  const int total_solvers = kPhases * solvers_per_phase;
-  highs_solvers_.resize(total_solvers);
-  row_lowers_.resize(total_solvers);
-  row_uppers_.resize(total_solvers);
-  solver_mutexes_.reserve(n_threads);
-  for (int i = 0; i < n_threads; ++i) {
-    solver_mutexes_.push_back(std::make_unique<std::mutex>());
-  }
-
-  // Initialize solver instances once and then reuse them. prepareLpMatrices()
-  // is now a pure function of reduced_inputs_, which precomputeMatrices() filled
-  // single-threaded above, so this loop no longer races on shared state -- it is
-  // kept sequential only because it is cheap. The expensive HiGHS models are
-  // built once and only row bounds are updated inside the backward loop.
-  for (int phase = 0; phase < kPhases; ++phase) {
-    for (int s = 0; s < solvers_per_phase; ++s) {
-      const int solver_index = phase * solvers_per_phase + s;
-      auto [highs_solver, row_lower, row_upper] = initializeHighs(phase);
-      highs_solvers_[solver_index] = std::move(highs_solver);
-      row_lowers_[solver_index] = std::move(row_lower);
-      row_uppers_[solver_index] = std::move(row_upper);
-    }
-  }
-  logger_->info("Done initializing Highs solvers");
-
+  // One band LP per (level, theta, phase) node, each on its own solver
+  // instance: the nodes of a level are independent, and nothing is shared
+  // between them but read-only block data.
   ThreadPool pool(n_threads);
   for (int switch_cnt = 0; switch_cnt <= max_switches_; ++switch_cnt) {
     logger_->info("Computing value function for switch count {}/{}", switch_cnt,
@@ -1733,50 +1720,73 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
 
     for (auto [theta_idx, t_range_ids] : theta_range_ids) {
       for (int phase = 0; phase < kPhases; ++phase) {
-        const int solver_index
-            = phase * solvers_per_phase
-              + (static_cast<int>(theta_idx) % solvers_per_phase);
         futures.push_back(pool.enqueue([this, switch_cnt, phase, theta_idx,
-                                        t_range_ids, solver_index, total_tasks,
+                                        t_range_ids, total_tasks,
                                         &completed_tasks]() {
-          const double theta = t_range_[theta_idx];
+          const double theta = t_range_[static_cast<std::size_t>(theta_idx)];
           logger_->info(
               "Starting computation for theta_idx: {}, phase: {}, switch_cnt: "
               "{}",
               theta_idx, phase, switch_cnt);
-          std::lock_guard<std::mutex> lock(*solver_mutexes_[solver_index]);
-          std::vector<double> x_next;
 
-          const auto n_t = static_cast<std::ptrdiff_t>(t_range_ids.size());
+          // The band runs over consecutive grid points ending at theta, so
+          // that every segment has length t_delta_ and the last node is the
+          // one the border condition is given at.
+          const auto n_t = t_range_ids.size();
           if (n_t == 0) {
             throw std::runtime_error("run: empty t_range_ids");
           }
-
-          for (std::ptrdiff_t i_t_idx = n_t - 1; i_t_idx >= 0; --i_t_idx) {
-            const int t_idx = t_range_ids[i_t_idx];
-            if (i_t_idx == n_t - 1) {
-              if (t_idx != theta_idx) {
-                throw std::runtime_error("run: last time id is not theta_idx");
-              }
-              const int switch_phase = phase == 0 ? 1 : 0;
-              x_next = getBorderConditions(switch_phase, theta_idx, theta,
-                                           switch_cnt);
-              if (x_next.empty()) {
-                // Unreachable node: nothing to march backwards from, and
-                // nothing to store. See getBorderConditions.
-                completed_tasks.fetch_add(1);
-                return;
-              }
-            } else {
-              x_next = solveMainLpStep(phase, solver_index, x_next);
+          if (t_range_ids.back() != theta_idx) {
+            throw std::runtime_error("run: last time id is not theta_idx");
+          }
+          for (std::size_t i = 1; i < n_t; ++i) {
+            if (t_range_ids[i] != t_range_ids[i - 1] + 1) {
+              throw std::runtime_error(std::format(
+                  "run: time ids of node theta_idx={} switch_cnt={} are not "
+                  "consecutive ({} follows {})",
+                  theta_idx, switch_cnt, t_range_ids[i], t_range_ids[i - 1]));
             }
-            value_function_.set(phase, switch_cnt, t_idx, theta_idx, x_next,
+          }
+
+          const int switch_phase = phase == 0 ? 1 : 0;
+          const std::vector<double> z_terminal
+              = getBorderConditions(switch_phase, theta_idx, theta, switch_cnt);
+          if (z_terminal.empty()) {
+            // Unreachable node: nothing to build a band from, and nothing to
+            // store. See getBorderConditions.
+            completed_tasks.fetch_add(1);
+            return;
+          }
+
+          const int num_stages = static_cast<int>(n_t) - 1;
+          std::vector<std::vector<double>> z;
+          if (num_stages >= 1) {
+            BandSolveStats stats;
+            z = solveBandLp(phase, switch_cnt, num_stages, z_terminal, &stats);
+            logger_->info(
+                "Band LP phase={} switch_cnt={} theta_idx={} stages={} "
+                "rows={} cols={} nnz={} solver={} status={}{} iters={} "
+                "time={:.2f}s objective={:.6e} integral={:.6e} "
+                "worst_residual={:.3e} (limit {:.3e})",
+                phase, switch_cnt, theta_idx, stats.stages, stats.rows,
+                stats.cols, stats.nnz, stats.solver, stats.model_status,
+                stats.accepted_non_optimal ? " (non-optimal accepted)" : "",
+                stats.iterations, stats.seconds, stats.objective,
+                stats.integral, stats.worst_residual, stats.residual_limit);
+          } else {
+            z.push_back(z_terminal);
+          }
+
+          for (std::size_t k = 0; k < z.size(); ++k) {
+            const int t_idx = t_range_ids[k];
+            value_function_.set(phase, switch_cnt, t_idx, theta_idx, z[k],
                                 static_cast<std::size_t>(
-                                    layouts_[phase].num_x));
-            auto [min_it, max_it]
-                = std::minmax_element(x_next.begin(), x_next.end());
-            const double min_val = min_it == x_next.end() ? 0.0 : *min_it;
-            const double max_val = max_it == x_next.end() ? 0.0 : *max_it;
+                                    layouts_[static_cast<std::size_t>(phase)]
+                                        .num_x));
+            auto [min_it, max_it] = std::minmax_element(z[k].begin(),
+                                                        z[k].end());
+            const double min_val = min_it == z[k].end() ? 0.0 : *min_it;
+            const double max_val = max_it == z[k].end() ? 0.0 : *max_it;
             logger_->info(
                 "Value function min/max at t_idx: {}, theta_idx: {}, phase: "
                 "{}, switch_cnt: {}: \t{:.4f}\t{:.4f}",

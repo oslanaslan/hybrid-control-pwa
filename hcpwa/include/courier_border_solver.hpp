@@ -109,6 +109,12 @@ struct CourierBorderRequest {
   int target_phase = 0;
   int source_phase = 0;
   std::span<const std::vector<double>> candidates;
+  // Columns of the target basis fixed to zero in the master: the gauge
+  // normalisation of the level, the same set the band LP pins at every stage
+  // (GaugeFix::pinsForLevel). The paper requires the conditions to be imposed
+  // identically in every problem sharing a set of node values; an empty span
+  // leaves the master with the full kernel and only its box, which is logged.
+  std::span<const int> pinned_columns;
   // Logging context only; does not affect the result.
   int theta_idx = 0;
   int switch_cnt = 0;

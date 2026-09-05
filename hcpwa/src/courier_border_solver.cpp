@@ -1318,16 +1318,23 @@ std::vector<double> CourierBorderSolver::solve(
 
   std::vector<double> col_lower(static_cast<std::size_t>(n_cols), -box);
   std::vector<double> col_upper(static_cast<std::size_t>(n_cols), box);
-  // Same gauge fixing as initializeHighs(): layer 0 free, first node of every
-  // later layer pinned to zero. Removes the additive barycentric nullspace
-  // without changing the represented function. Any new LP over this basis must
-  // use the identical convention or its output is not comparable.
-  for (int s = 1; s < kSubsystemCount; ++s) {
-    if (tgt_lay.eta_s[static_cast<std::size_t>(s)] == 0) {
-      throw std::runtime_error(
-          "CourierBorderSolver::solve: empty target projection layer");
+  // The gauge normalisation of the level, handed over by the caller: the same
+  // columns the band LP fixes at every stage, so the node values returned here
+  // obey that LP's bounds when they become its terminal condition. Removes the
+  // null directions of the parametrisation without changing the represented
+  // function.
+  if (request.pinned_columns.empty()) {
+    logger_->warn(
+        "CourierBorderSolver::solve: no gauge pins given; the master keeps "
+        "the full kernel of the parametrisation and relies on its box");
+  }
+  for (const int col : request.pinned_columns) {
+    if (col < 0 || col >= n_cols) {
+      throw std::invalid_argument(std::format(
+          "CourierBorderSolver::solve: pinned column {} outside the target "
+          "basis of {} columns",
+          col, n_cols));
     }
-    const int col = tgt_lay.idxX(s, 0);
     col_lower[static_cast<std::size_t>(col)] = 0.0;
     col_upper[static_cast<std::size_t>(col)] = 0.0;
   }

@@ -6,8 +6,8 @@
 #include <Highs.h>
 #include <algo.hpp>
 #include <array>
+#include <limits>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -17,7 +17,9 @@
 
 #include "barycentric_geometry_types.hpp"
 #include "courier_border_solver.hpp"
+#include "util/band_lp.hpp"
 #include "util/block_reduction_lp.hpp"
+#include "util/gauge_fix.hpp"
 #include "interval_building.hpp"
 #include "util/value_function_utils.hpp"
 
@@ -85,6 +87,53 @@ struct BlockSystemMatrices {
   BoxRegionData box;
 };
 
+// How the band LP of one node is solved. The first attempt is `solver`; if it
+// does not return an optimal point, the other solver is tried on a fresh
+// model, and only then is a primal-feasible non-optimal point accepted -- the
+// same tightness-only relaxation the one-step solver used to apply, with the
+// residuals re-derived from the formulas afterwards either way. Anything else
+// is fatal: the node has no certified point.
+struct BandLpOptions {
+  // "ipm" (interior point, crossover per run_crossover) or "simplex" (dual).
+  // Measured on the N=100 arrangement with nine stages (59 166 rows x 12 852
+  // columns): interior point 6.8 s, interior point with crossover 12.3 s, dual
+  // simplex 75 s, all three optimal with the same integral. The interior point
+  // without crossover returns a strictly feasible point, whose residuals sit
+  // below zero rather than at the solver tolerance.
+  std::string solver = "ipm";
+  bool run_crossover = false;
+  int ipm_iteration_limit = 1000;
+  // A cycling simplex has to end. One step-4 solve of the one-step LP ran 3.8
+  // million iterations with the objective oscillating between exactly two
+  // values; the worst honest solve in the same run took 78403, so this cap is
+  // five times that.
+  int simplex_iteration_limit = 400000;
+  double time_limit = std::numeric_limits<double>::infinity();
+};
+
+// What one band solve did, for the run log.
+struct BandSolveStats {
+  int stages = 0;
+  int rows = 0;
+  int cols = 0;
+  long long nnz = 0;
+  // The attempt that produced the point: "ipm" or "simplex".
+  std::string solver;
+  // HighsModelStatus of that attempt, as an int.
+  int model_status = 0;
+  bool accepted_non_optimal = false;
+  long long iterations = 0;
+  double seconds = 0.0;
+  // s * sum_{k<L} omega_k q^T z_k in the original units.
+  double objective = 0.0;
+  // dt * sum_{k<=L} omega_k q^T z_k: the integral of the estimate over
+  // [t_0, theta] x Omega.
+  double integral = 0.0;
+  // Largest s * F over all stages, both ends, and its admitted limit.
+  double worst_residual = 0.0;
+  double residual_limit = 0.0;
+};
+
 class BarycentricAffineApproximator {
  private:
   double t_max_;
@@ -99,18 +148,13 @@ class BarycentricAffineApproximator {
 
   bool highs_verbose_ = false;
   ApproximationMode approximation_mode_ = ApproximationMode::Upper;
-  // Opt-in re-derivation of the courier border conditions. The main LP residual
-  // check is no longer behind this: separability made it cheap enough to run
-  // unconditionally, but the courier re-derivation still costs a pass over all
-  // M regions.
+  // Opt-in re-derivation of the courier border conditions. The band LP
+  // residual check is not behind this: separability made it cheap enough to
+  // run unconditionally, but the courier re-derivation still costs a pass over
+  // all M regions.
   bool validate_ = false;
 
-  // Objective weights of the reduced LP. The default reproduces the product
-  // objective exactly and keeps the LP bounded; see ObjectiveWeights.
-  block_reduction::ObjectiveWeights objective_weights_
-      = block_reduction::ObjectiveWeights::ProductCount;
-  // Weak epsilon * ||z||_1 regularization for a reproducible tie-break.
-  double tie_break_eps_ = 0.0;
+  BandLpOptions band_options_;
 
   hcpwa::TriangleGeometryOptions geometry_options_;
 
@@ -120,33 +164,27 @@ class BarycentricAffineApproximator {
   std::array<PhaseGeometry, kPhases> phase_geometries_;
   std::array<BarycentricVarLayout, kPhases> layouts_;
 
-  // w = integral over Omega of phi^(phase)(n) dn, the objective of the border LP
-  // (step 2.2, section 7). Computed in closed form from triangle areas.
+  // q = integral over Omega of the hat function of each node (lemma on
+  // quadrature). The objective of the band LP and of the courier master.
+  // Computed in closed form from triangle areas.
   std::array<Eigen::VectorXd, kPhases> node_weights_;
 
   // Per phase, per block, per block-region.
   std::array<std::array<std::vector<BlockSystemMatrices>, kBlockCount>, kPhases>
       block_system_;
 
-  // The reduced LP, one per phase. reduced_inputs_ is the block data the row
-  // builder, the per-step RHS update and the exact worst residual all read, so
+  // The block data of one stage, one per phase. reduced_inputs_ is what the
+  // band assembler, the terminal RHS and the exact worst residual all read, so
   // the three cannot disagree about the row scale.
   std::array<block_reduction::ReducedLpInput, kPhases> reduced_inputs_;
   std::array<block_reduction::ReducedLpColLayout, kPhases> reduced_cols_;
   std::array<block_reduction::ReducedLpRowLayout, kPhases> reduced_rows_;
-  // Positive factor the cost vector handed to HiGHS was divided by. Scaling a
-  // linear objective by a positive constant is an exact reformulation -- same
-  // feasible set, same optimal face -- but it matters here because HiGHS tests
-  // dual feasibility with an absolute tolerance on the reduced costs, and the
-  // R/R_b weights make raw costs reach 1e+06. Multiply reported objective
-  // values by it to read them back in the original units.
-  std::array<double, kPhases> objective_scales_{1.0, 1.0};
+
+  // The gauge normalisation of each phase, shared by the band LP and the
+  // courier master. Built and verified in precomputeMatrices().
+  std::array<GaugeFix, kPhases> gauge_fixes_;
 
   std::shared_ptr<spdlog::logger> logger_;
-  std::vector<std::unique_ptr<Highs>> highs_solvers_;
-  std::vector<std::vector<double>> row_lowers_;
-  std::vector<std::vector<double>> row_uppers_;
-  std::vector<std::unique_ptr<std::mutex>> solver_mutexes_;
 
   interval_building::ThetaTIndexLists theta_t_index_lists_;
   // Nodes the theta lists carry that no earlier layer can reach; see the
@@ -195,13 +233,13 @@ class BarycentricAffineApproximator {
   ApproximationMode approximationMode() const { return approximation_mode_; }
 
   // Enables the independent re-derivation of the courier border conditions.
-  // The main LP residual check is unconditional and not affected by this.
+  // The band LP residual check is unconditional and not affected by this.
   void setValidate(bool validate) { validate_ = validate; }
 
-  void setObjectiveWeights(block_reduction::ObjectiveWeights weights) {
-    objective_weights_ = weights;
+  void setBandLpOptions(const BandLpOptions& options) {
+    band_options_ = options;
   }
-  void setTieBreakEps(double eps) { tie_break_eps_ = eps; }
+  const BandLpOptions& bandLpOptions() const { return band_options_; }
 
   // Must be set before getIntersectionPoints(). Turning build_8d_vertices off
   // skips the 8D product of the block cells, which nothing but the courier
@@ -253,11 +291,6 @@ class BarycentricAffineApproximator {
   // difference means the two paths resolved different branches.
   void validateBlockDecomposition(int phase) const;
 
-  // Assembles the reduced LP of one phase. Pure function of the precomputed
-  // block data: precomputeMatrices() fills reduced_inputs_ single-threaded,
-  // before any solver exists.
-  block_reduction::ReducedLpMatrices prepareLpMatrices(int phase) const;
-
   // Builds reduced_inputs_[phase] from the block geometry and the block system
   // matrices. Called once, from precomputeMatrices().
   void buildReducedLpInput(int phase);
@@ -265,28 +298,27 @@ class BarycentricAffineApproximator {
   std::vector<double> getBorderConditions(int switch_phase, int theta_idx,
                                           double theta, int switch_cnt) const;
 
-  std::tuple<std::unique_ptr<Highs>, std::vector<double>, std::vector<double>>
-  initializeHighs(int phase);
+  // The band LP of one node: z_L = z_terminal given, num_stages segments of
+  // length t_delta before it, the gauge pins of level switch_cnt applied at
+  // every stage. Returns z_0, ..., z_{L-1}, z_L. Throws unless every stage is
+  // certified by the exact worst residual -- that check is the statement that
+  // the result is a bound and does not depend on anything HiGHS asserts.
+  // Reentrant: allocates its own solver and mutates no member.
+  std::vector<std::vector<double>> solveBandLp(
+      int phase, int switch_cnt, int num_stages,
+      const std::vector<double>& z_terminal,
+      BandSolveStats* stats = nullptr) const;
 
-  void updateHighsRhsUpperBounds(int phase, int solver_index,
-                                 const std::vector<double>& x_next);
-
-  std::vector<double> solveLp(int phase, int solver_index);
-
-  std::vector<double> solveMainLpStep(int phase, int solver_index,
-                                      const std::vector<double>& x_next);
+  // The exact worst residual of every stage of z = (z_0, ..., z_L) over the
+  // whole product of regions and vertices, checked against the admitted limit.
+  // Returns the worst s * F; throws if any stage has the wrong sign.
+  double validateBandResiduals(int phase,
+                               const std::vector<std::vector<double>>& z) const;
 
   void precomputeMatrices();
 
-  // Recomputes the exact worst residual of one segment over the whole product
-  // of regions and vertices and checks its sign. Separability turns what used
-  // to be a pass over prod_b R_b pairs into sum_b R_b, so this runs on every
-  // step: it is the check that the constructed function is a bound.
-  void validateStepResiduals(int phase, const std::vector<double>& x_next,
-                             const std::vector<double>& z) const;
-
-  // The assembled reduced LP of one phase, for diagnostics and for driving a
-  // single step from outside run().
+  // The block data of one stage of one phase, for diagnostics and for driving
+  // a band solve from outside run().
   const block_reduction::ReducedLpInput& reducedLpInput(int phase) const {
     return reduced_inputs_[static_cast<std::size_t>(phase)];
   }
@@ -295,6 +327,9 @@ class BarycentricAffineApproximator {
   }
   const block_reduction::ReducedLpColLayout& reducedLpCols(int phase) const {
     return reduced_cols_[static_cast<std::size_t>(phase)];
+  }
+  const std::array<GaugeFix, kPhases>& gaugeFixes() const {
+    return gauge_fixes_;
   }
 
   // Read-only views of the ingested geometry, for diagnostics and for driving
@@ -308,6 +343,7 @@ class BarycentricAffineApproximator {
   const std::array<Eigen::VectorXd, kPhases>& nodeWeights() const {
     return node_weights_;
   }
+  double tDelta() const { return t_delta_; }
 
   void run(const std::string& output_folder_path, int n_threads = 2);
 

@@ -13,6 +13,30 @@
 #include "morph.hpp"
 #include "types.hpp"
 
+// Reads an environment override, or returns the default. The defaults are the
+// production configuration; the overrides exist so the same run can be staged
+// on a smaller machine -- a shorter horizon, fewer levels, fewer workers --
+// without editing this file and without a second code path. A short horizon is
+// the only way to exercise the whole recursion to termination anywhere but the
+// production machine: the level count is ceil(t_max / tau_min), so T = 150 on
+// a 31-point grid runs all sixteen of its levels, tail included, where the
+// production configuration has a hundred and twenty.
+static int envInt(const char* name, int fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  return std::atoi(value);
+}
+
+static double envDouble(const char* name, double fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  return std::atof(value);
+}
+
 // The caller owns the cdd global constants: they have to outlive the whole
 // run, not just this factory. They used to be initialised and freed here, so
 // the arrangement -- which goes through cdd for every vertex enumeration --
@@ -68,8 +92,9 @@ create_barycentric_approximator() {
       = barycentric_affine_approximator::ApproximationMode::Lower;
   bool highs_verbose = true;
   return barycentric_affine_approximator::BarycentricAffineApproximator(
-      t_max, t_split_count, tau_min, tau_max, system_params, highs_verbose,
-      approximation_mode);
+      envDouble("HCPWA_T_MAX", t_max),
+      envInt("HCPWA_T_SPLIT_COUNT", t_split_count), tau_min, tau_max,
+      system_params, highs_verbose, approximation_mode);
 }
 
 // Deliberately coarse, so that a complete solution is reachable at N=160.
@@ -179,18 +204,6 @@ TEST(common, DISABLED_barycentric_preflight) {
   }
 }
 
-// Reads an environment override, or returns the default. The defaults are the
-// production configuration; the overrides exist so the same run can be staged
-// on a smaller machine -- fewer levels, fewer workers -- without editing this
-// file and without a second code path.
-static int envInt(const char* name, int fallback) {
-  const char* value = std::getenv(name);
-  if (value == nullptr || *value == '\0') {
-    return fallback;
-  }
-  return std::atoi(value);
-}
-
 TEST(common, barycentric_affine_solver) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;
@@ -204,6 +217,12 @@ TEST(common, barycentric_affine_solver) {
   if (max_switches >= 0) {
     barycentric_approximator.setMaxSwitches(max_switches);
   }
+  // How many of the available (level, switching instant) pairs the transfer
+  // step maximises over. Any cap is sound -- a maximum over a subset is the
+  // stronger requirement -- and it is what keeps the cost of a level from
+  // growing with the level. 0 keeps all of them.
+  barycentric_approximator.setMaxBorderCandidates(
+      envInt("HCPWA_MAX_CANDIDATES", 0));
 
   // The default is the production machine's results tree. Overridable so the
   // same test can be run anywhere without editing it; run() throws if the

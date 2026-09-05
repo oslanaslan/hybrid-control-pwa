@@ -13,10 +13,13 @@
 #include "morph.hpp"
 #include "types.hpp"
 
+// The caller owns the cdd global constants: they have to outlive the whole
+// run, not just this factory. They used to be initialised and freed here, so
+// the arrangement -- which goes through cdd for every vertex enumeration --
+// ran after dd_free_global_constants(). Harmless in the double build, where
+// clearing a constant is a no-op, and silent in any build until it is not.
 static barycentric_affine_approximator::BarycentricAffineApproximator
 create_barycentric_approximator() {
-  cddwrap::global_init();
-  defer _ = &cddwrap::global_free;
   // Same parameters as user_algo_tests (compute_areas_vertices)
   constexpr double N = 160;
   constexpr double F = 0.5;
@@ -108,7 +111,55 @@ static barycentric_affine_approximator::BandLpOptions band_lp_options() {
   return options;
 }
 
+// Pre-flight for the run below: the whole pipeline up to and including one
+// band LP of the widest kind, on the production parameters, without the
+// twenty-odd thousand nodes. Everything that fails in the first minute of a
+// real run fails here in a few seconds -- the arrangement, the block
+// factorisation, the gauge normalisation checked against the kernel of the
+// assembled rows, the band assembler, HiGHS, and the residual check that says
+// the result is a bound.
+//
+// Nine stages is what 93% of the nodes of this grid carry: T = 1200 on 240
+// points is dt = 5.02, and tau_max / dt = 9.
+TEST(common, DISABLED_barycentric_preflight) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  auto approximator = create_barycentric_approximator();
+  approximator.setCourierOptions(coarse_courier_options());
+  approximator.setBandLpOptions(band_lp_options());
+
+  approximator.getIntersectionPoints();
+  // Builds the block system matrices, cross-checks them against the eight-cell
+  // assembly, and verifies the gauge pins against the numerical kernel.
+  approximator.precomputeMatrices();
+
+  for (int phase = 0; phase < barycentric_affine_approximator::kPhases;
+       ++phase) {
+    const int num_x = approximator.layouts()[phase].num_x;
+    const std::vector<double> z_terminal(static_cast<std::size_t>(num_x), 0.0);
+    barycentric_affine_approximator::BandSolveStats stats;
+    // Level 0, the terminal family: z(T) = 0 and the third block's plane
+    // identically zero.
+    const auto z = approximator.solveBandLp(phase, /*switch_cnt=*/0,
+                                            /*num_stages=*/9, z_terminal,
+                                            &stats);
+    ASSERT_EQ(z.size(), 10u);
+    EXPECT_LE(stats.worst_residual, stats.residual_limit);
+    GTEST_LOG_(INFO) << "phase " << phase << ": " << stats.rows << " x "
+                     << stats.cols << ", " << stats.nnz << " nnz, "
+                     << stats.solver << " status " << stats.model_status
+                     << " in " << stats.seconds << " s, " << stats.iterations
+                     << " iterations, integral " << stats.integral
+                     << ", worst residual " << stats.worst_residual
+                     << " against a limit of " << stats.residual_limit;
+  }
+}
+
 TEST(common, barycentric_affine_solver) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
   auto barycentric_approximator = create_barycentric_approximator();
   barycentric_approximator.setCourierOptions(coarse_courier_options());
   barycentric_approximator.setBandLpOptions(band_lp_options());

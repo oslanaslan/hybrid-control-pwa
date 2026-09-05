@@ -783,7 +783,53 @@ PhaseIntersectionResult compute_intersection_points(
   hcpwa::AABB<3> aabb3d = {{0, 0, 0}, {N, N, N}};
   const auto aabb3d_bounds = hcpwa::AABBBounds(aabb3d);
 
-  auto computend = []<int Dim>(
+  // A cell is a region of the LP only if it has an interior. Two triangles of
+  // the two planes of a block whose ranges in the shared coordinate merely
+  // touch (T1 in {n <= c}, T3 in {n >= c}) still intersect, in a polygon inside
+  // the plane {n = c}, and cddlib returns its vertices. Such a cell contributes
+  // nothing to the certificate -- the proof only ever uses the gradient of a
+  // full-dimensional region (remark on differentiation along trajectories) --
+  // but its gradient row is a mixture of two neighbouring charts that depends
+  // on the representation of V rather than on V, which breaks the gauge
+  // structure the normalisation is derived from. On the N=100 arrangement a
+  // quarter of the block cells were of this kind. The test: the vertices span
+  // Dim independent directions, by Gram-Schmidt against an absolute tolerance
+  // orders of magnitude above cddlib's rounding and below any feature of the
+  // arrangement.
+  auto cellHasInterior = []<int Dim>(const std::vector<hcpwa::Vec<Dim>>& vertices,
+                                     double tol) {
+    if (vertices.size() < static_cast<std::size_t>(Dim) + 1) {
+      return false;
+    }
+    std::vector<hcpwa::Vec<Dim>> basis;
+    for (std::size_t i = 1; i < vertices.size() && basis.size() < Dim; ++i) {
+      hcpwa::Vec<Dim> d = vertices[i] - vertices[0];
+      for (const hcpwa::Vec<Dim>& b : basis) {
+        double proj = 0.0;
+        for (int c = 0; c < Dim; ++c) {
+          proj += static_cast<double>(d[c]) * static_cast<double>(b[c]);
+        }
+        for (int c = 0; c < Dim; ++c) {
+          d[c] -= static_cast<hcpwa::Float>(proj) * b[c];
+        }
+      }
+      double norm = 0.0;
+      for (int c = 0; c < Dim; ++c) {
+        norm += static_cast<double>(d[c]) * static_cast<double>(d[c]);
+      }
+      norm = std::sqrt(norm);
+      if (norm > tol) {
+        for (int c = 0; c < Dim; ++c) {
+          d[c] /= static_cast<hcpwa::Float>(norm);
+        }
+        basis.push_back(d);
+      }
+    }
+    return basis.size() == static_cast<std::size_t>(Dim);
+  };
+  const double interior_tol = 1e-8 * static_cast<double>(N);
+
+  auto computend = [&cellHasInterior, interior_tol]<int Dim>(
                        std::array<int, Dim> dims,
                        const hcpwa::LineSet<Dim>& bounds,
                        const std::vector<hcpwa::LineSet<8>>& prisms0,
@@ -795,6 +841,7 @@ PhaseIntersectionResult compute_intersection_points(
     const std::size_t total_pairs = prisms0.size() * prisms1.size();
     std::size_t processed_pairs = 0;
     std::size_t non_empty_pairs = 0;
+    std::size_t flat_pairs = 0;
     const auto started_at = std::chrono::steady_clock::now();
     auto next_progress_at = started_at;
     auto report_progress = [&](bool force) {
@@ -814,9 +861,9 @@ PhaseIntersectionResult compute_intersection_points(
           = std::chrono::duration<double>(now - started_at).count();
       std::cerr << std::format(
           "Intersection {} progress: {:.1f}% ({}/{} pairs), non_empty={}, "
-          "elapsed={:.1f}s\n",
+          "flat (dropped)={}, elapsed={:.1f}s\n",
           label, percent, processed_pairs, total_pairs, non_empty_pairs,
-          elapsed_seconds);
+          flat_pairs, elapsed_seconds);
       std::cerr.flush();
       next_progress_at = now + std::chrono::seconds(5);
     };
@@ -833,11 +880,16 @@ PhaseIntersectionResult compute_intersection_points(
         }
         auto intersection = hcpwa::LinesToPoints<Dim>(concatenated_prisms);
         if (intersection.size() > 0) {
-          ++non_empty_pairs;
-          out_points.push_back(intersection);
-          // Store the indices of the prisms that form the intersection
-          std::vector<size_t> prism_indices = {idx0, idx1};
-          out_indices.push_back(prism_indices);
+          if (!cellHasInterior.template operator()<Dim>(intersection,
+                                                          interior_tol)) {
+            ++flat_pairs;
+          } else {
+            ++non_empty_pairs;
+            out_points.push_back(intersection);
+            // Store the indices of the prisms that form the intersection
+            std::vector<size_t> prism_indices = {idx0, idx1};
+            out_indices.push_back(prism_indices);
+          }
         }
         ++processed_pairs;
         if (processed_pairs % 10000 == 0) {
@@ -846,6 +898,11 @@ PhaseIntersectionResult compute_intersection_points(
       }
     }
     report_progress(true);
+    if (verbose) {
+      std::cerr << std::format(
+          "Intersection {}: {} cells with an interior, {} flat cells dropped\n",
+          label, non_empty_pairs, flat_pairs);
+    }
   };
 
   if (verbose) {

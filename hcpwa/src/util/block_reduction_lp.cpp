@@ -64,17 +64,6 @@ void checkBlocks(const ReducedLpInput& input) {
   }
 }
 
-// Psi_{b,j} x for one block-region.
-Eigen::VectorXd psiTimes(const BlockRegionData& region,
-                         const std::vector<double>& x) {
-  const int rows = static_cast<int>(region.psi_rows.size());
-  Eigen::VectorXd out(rows);
-  for (int p = 0; p < rows; ++p) {
-    out(p) = region.psi_rows[p].dot(x);
-  }
-  return out;
-}
-
 // Number of (region, vertex) pairs of one block.
 int blockPairCount(const ReducedLpBlock& block) {
   int total = 0;
@@ -98,6 +87,83 @@ void appendRow(std::vector<int>& starts, std::vector<int>& cols,
 }
 
 }  // namespace
+
+Eigen::VectorXd psiTimes(const BlockRegionData& region,
+                         const std::vector<double>& x) {
+  const int rows = static_cast<int>(region.psi_rows.size());
+  Eigen::VectorXd out(rows);
+  for (int p = 0; p < rows; ++p) {
+    out(p) = region.psi_rows[p].dot(x);
+  }
+  return out;
+}
+
+SparseVec leftRowZCoefficients(const ReducedLpBlock& block,
+                               const BlockRegionData& region,
+                               const BlockVertexData& vertex, double sign_s,
+                               double t_delta, int z_offset) {
+  // a = Psi_{b,j}^T m - phi / dt.
+  SparseVec a;
+  for (int p = 0; p < block.coord_count; ++p) {
+    const SparseVec& psi_row = region.psi_rows[static_cast<std::size_t>(p)];
+    for (std::size_t i = 0; i < psi_row.cols.size(); ++i) {
+      a.add(z_offset + psi_row.cols[i], psi_row.vals[i] * vertex.m(p),
+            kAssembleEps);
+    }
+  }
+  for (std::size_t i = 0; i < vertex.phi.cols.size(); ++i) {
+    a.add(z_offset + vertex.phi.cols[i], -vertex.phi.vals[i] / t_delta,
+          kAssembleEps);
+  }
+  SparseVec out;
+  for (std::size_t i = 0; i < a.cols.size(); ++i) {
+    out.add(a.cols[i], sign_s * a.vals[i], kAssembleEps);
+  }
+  return out;
+}
+
+void addRhoTerms(SparseVec& row, const BlockVertexData& vertex,
+                 int coord_count, int y_first_column) {
+  for (int p = 0; p < coord_count; ++p) {
+    const double rho = vertex.rho(p);
+    if (rho < 0.0) {
+      throw std::runtime_error(
+          "block_reduction: negative rho; call clampBlockRho first");
+    }
+    if (rho > 0.0 && rho <= kSmallMatrixValue) {
+      // HiGHS would drop this entry, which removes a term that only ever
+      // tightens (L). The result would silently stop being a bound.
+      std::ostringstream message;
+      message << "block_reduction: rho = " << rho
+              << " is at or below the HiGHS small_matrix_value; call "
+                 "clampBlockRho first";
+      throw std::runtime_error(message.str());
+    }
+    row.add(y_first_column + p, rho, 0.0);
+  }
+}
+
+TerminalRowUpper terminalRowUpper(const BlockVertexData& vertex,
+                                  const Eigen::VectorXd& psi_x, double phi_x,
+                                  double sign_s, double t_delta) {
+  const double s = sign_s;
+  const double dt = t_delta;
+  TerminalRowUpper out;
+  // Same scale as the row builders: plain F, no dt factor. The left bound is
+  // the static part -s g plus the per-x part, in that order, which is the
+  // arithmetic updateReducedLpRowUpper has always done.
+  out.left = (-s * vertex.g) - s * phi_x / dt;
+  if (std::abs(out.left) <= kRhsSnapEps) {
+    out.left = 0.0;
+  }
+  const double beta
+      = psi_x.dot(vertex.m) + s * vertex.rho.dot(psi_x.cwiseAbs()) + vertex.g;
+  out.right = -s * (phi_x / dt + beta);
+  if (std::abs(out.right) <= kRhsSnapEps) {
+    out.right = 0.0;
+  }
+  return out;
+}
 
 int ReducedLpColLayout::idxX(int column) const {
   if (column < 0 || column >= num_x) {
@@ -353,40 +419,12 @@ ReducedLpMatrices assembleReducedLp(const ReducedLpInput& input) {
       for (int k = 0; k < static_cast<int>(region.vertices.size()); ++k) {
         const BlockVertexData& vertex = region.vertices[k];
 
-        // a_b = Psi_{b,j}^T m_b - phi_b / dt.
-        SparseVec a;
-        for (int p = 0; p < block.coord_count; ++p) {
-          const SparseVec& psi_row = region.psi_rows[p];
-          for (std::size_t i = 0; i < psi_row.cols.size(); ++i) {
-            a.add(psi_row.cols[i], psi_row.vals[i] * vertex.m(p),
-                  kAssembleEps);
-          }
-        }
-        for (std::size_t i = 0; i < vertex.phi.cols.size(); ++i) {
-          a.add(vertex.phi.cols[i], -vertex.phi.vals[i] / dt, kAssembleEps);
-        }
-
-        SparseVec left_row;
-        for (std::size_t i = 0; i < a.cols.size(); ++i) {
-          left_row.add(a.cols[i], s * a.vals[i], kAssembleEps);
-        }
-        for (int p = 0; p < block.coord_count; ++p) {
-          const double rho = vertex.rho(p);
-          if (rho < 0.0) {
-            throw std::runtime_error(
-                "assembleReducedLp: negative rho; call clampBlockRho first");
-          }
-          if (rho > 0.0 && rho <= kSmallMatrixValue) {
-            // HiGHS would drop this entry, which removes a term that only ever
-            // tightens (L). The result would silently stop being a bound.
-            std::ostringstream message;
-            message << "assembleReducedLp: rho = " << rho
-                    << " is at or below the HiGHS small_matrix_value; call "
-                       "clampBlockRho first";
-            throw std::runtime_error(message.str());
-          }
-          left_row.add(out.cols.idxYBlock(b, j, p), rho, 0.0);
-        }
+        // s a_b on the z columns, a_b = Psi_{b,j}^T m_b - phi_b / dt, then
+        // rho^T y_{b,j} and the epigraph column.
+        SparseVec left_row
+            = leftRowZCoefficients(block, region, vertex, s, dt, /*z_offset=*/0);
+        addRhoTerms(left_row, vertex, block.coord_count,
+                    out.cols.idxYBlock(b, j, 0));
         left_row.add(out.cols.idxMuL(b), -1.0, 0.0);
 
         const int expected_left = out.rows.rowLeft(b, j, k);
@@ -545,22 +583,13 @@ std::vector<double> updateReducedLpRowUpper(
       for (int k = 0; k < static_cast<int>(region.vertices.size()); ++k) {
         const BlockVertexData& vertex = region.vertices[k];
         const double phi_x = vertex.phi.dot(x_next);
-
-        // Same scale as the row builder above: plain F, no dt factor.
-        const int row_left = rows.rowLeft(b, j, k);
-        double left = base_upper[row_left] - s * phi_x / dt;
-        if (std::abs(left) <= kRhsSnapEps) {
-          left = 0.0;
-        }
-        upper[row_left] = left;
-
-        const double beta
-            = q.dot(vertex.m) + s * vertex.rho.dot(q.cwiseAbs()) + vertex.g;
-        double right = -s * (phi_x / dt + beta);
-        if (std::abs(right) <= kRhsSnapEps) {
-          right = 0.0;
-        }
-        upper[rows.rowRight(b, j, k)] = right;
+        // Same scale as the row builder above: plain F, no dt factor. The
+        // static -s g the row was assembled with is recomputed from the vertex
+        // rather than read back from base_upper; the two are the same number.
+        const TerminalRowUpper terminal
+            = terminalRowUpper(vertex, q, phi_x, s, dt);
+        upper[rows.rowLeft(b, j, k)] = terminal.left;
+        upper[rows.rowRight(b, j, k)] = terminal.right;
       }
     }
   }

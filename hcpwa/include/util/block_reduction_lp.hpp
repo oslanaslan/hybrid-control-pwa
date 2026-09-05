@@ -210,6 +210,45 @@ std::vector<double> updateReducedLpRowUpper(
     const ReducedLpInput& input, const ReducedLpRowLayout& rows,
     const std::vector<double>& base_upper, const std::vector<double>& x_next);
 
+// ---- Pieces shared with the band assembler (util/band_lp.hpp). -----------
+//
+// The band LP over L stages has, at its last stage, exactly the rows of this
+// one-step LP with z_{k+1} = z_L known. Both assemblers build those rows from
+// the helpers below, and the one-stage band is tested against assembleReducedLp
+// coefficient for coefficient, so the two cannot drift apart.
+
+// Psi_{b,j} x for one block-region.
+Eigen::VectorXd psiTimes(const BlockRegionData& region,
+                         const std::vector<double>& x);
+
+// The z-column coefficients of row (L) of one vertex: s * a with
+// a = Psi_{b,j}^T m - phi / dt, every column shifted by z_offset. The pruning
+// sequence is the one assembleReducedLp has always used, so identical inputs
+// give identical coefficients whatever the offset.
+SparseVec leftRowZCoefficients(const ReducedLpBlock& block,
+                               const BlockRegionData& region,
+                               const BlockVertexData& vertex, double sign_s,
+                               double t_delta, int z_offset);
+
+// Appends rho^T y of one vertex to a row, (y_{b,j})_p sitting at
+// y_first_column + p, with the checks that make dropping a radius impossible:
+// a negative one means clampBlockRho was not called, one at or below
+// kSmallMatrixValue would be dropped by HiGHS and is refused.
+void addRhoTerms(SparseVec& row, const BlockVertexData& vertex,
+                 int coord_count, int y_first_column);
+
+// Upper bounds of rows (L) and (R) of one vertex when the next node value x is
+// known: -s (g + phi^T x / dt) and -s (phi^T x / dt + beta), beta being the
+// residual of x itself at this vertex. psi_x = Psi_{b,j} x, phi_x = phi^T x.
+// Both are snapped to zero below kRhsSnapEps.
+struct TerminalRowUpper {
+  double left = 0.0;
+  double right = 0.0;
+};
+TerminalRowUpper terminalRowUpper(const BlockVertexData& vertex,
+                                  const Eigen::VectorXd& psi_x, double phi_x,
+                                  double sign_s, double t_delta);
+
 struct WorstResidual {
   double left = 0.0;
   double right = 0.0;

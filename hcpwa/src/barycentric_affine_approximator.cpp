@@ -1863,6 +1863,39 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
               mean_value += q(i) * z[k][static_cast<std::size_t>(i)];
             }
             mean_value /= omega_volume;
+
+            // An independent ceiling on a lower estimate, derived from the
+            // model rather than from the rows that produced z. The value
+            // function is a minimum over disturbances of the integral of the
+            // running cost, so it cannot exceed the remaining horizon times
+            // the largest the cost can be:
+            //   V^(r)(t, n, i, theta) <= (T - t) * max_n g_i(n),
+            // and the same then holds for the mean over Omega of any lower
+            // estimate. g_i is a sum of four flows, each capped by its own
+            // beta * F, whatever branch of the minimum is active. The residual
+            // check cannot see an error in the residual formulas themselves;
+            // this can, and it costs one comparison.
+            if (approximation_mode_ == ApproximationMode::Lower) {
+              const double beta_sum
+                  = phase == 0
+                        ? system_params_.b31 + system_params_.b36
+                              + system_params_.b24 + system_params_.b27
+                        : system_params_.b51 + system_params_.b57
+                              + system_params_.b84 + system_params_.b86;
+              const double ceiling
+                  = (t_max_ - t_range_[static_cast<std::size_t>(t_idx)])
+                    * beta_sum * system_params_.F;
+              if (mean_value > ceiling + kResidualValidationTol) {
+                throw std::runtime_error(std::format(
+                    "run: phase {} switch_cnt {} theta_idx {} t_idx {}: the "
+                    "mean of the lower estimate over Omega is {}, above the "
+                    "model's own ceiling of {} = (T - t) * max g. A lower "
+                    "estimate cannot exceed the value function, and the value "
+                    "function cannot exceed that.",
+                    phase, switch_cnt, theta_idx, t_idx, mean_value, ceiling));
+              }
+            }
+
             auto [min_it, max_it] = std::minmax_element(z[k].begin(),
                                                         z[k].end());
             const double min_val = min_it == z[k].end() ? 0.0 : *min_it;

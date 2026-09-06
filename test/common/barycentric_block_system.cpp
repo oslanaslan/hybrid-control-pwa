@@ -408,6 +408,56 @@ TEST(barycentric_block_system, courier_converges_on_real_geometry) {
 // weights rests on. And Psi_b must touch only the x columns of its own block's
 // projection planes, which is the disjointness the three block rows are summed
 // under.
+// The same two claims on the production arrangement, where the tables are
+// large enough for an indexing mistake to hide: every region the screen
+// certifies is re-solved and must agree (verify_screen), and turning the
+// verification on must not move the answer by a bit, because it only reads.
+TEST(barycentric_block_system, screen_is_sound_on_real_geometry) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  const auto approximator_ptr = makePreparedApproximator();
+  auto& approximator = *approximator_ptr;
+
+  const int num_x = approximator.layouts()[1].num_x;
+  const std::vector<std::vector<double>> candidates
+      = {std::vector<double>(static_cast<std::size_t>(num_x), 0.2),
+         std::vector<double>(static_cast<std::size_t>(num_x), -0.1)};
+  const std::vector<int> pins = approximator.gaugeFixes()[0].pinsForLevel(1);
+  baa::CourierBorderRequest request;
+  request.target_phase = 0;
+  request.source_phase = 1;
+  request.candidates = candidates;
+  request.pinned_columns = pins;
+  request.switch_cnt = 1;
+
+  auto run = [&](bool verify, baa::CourierBorderStats* stats) {
+    baa::CourierBorderOptions options;
+    options.verify_screen = verify;
+    baa::CourierBorderSolver solver(options);
+    solver.prepare(approximator.phaseGeometries(), approximator.layouts(),
+                   approximator.nodeWeights(), 100.0);
+    return solver.solve(request, baa::ApproximationMode::Lower, stats);
+  };
+
+  baa::CourierBorderStats plain_stats;
+  baa::CourierBorderStats verified_stats;
+  const std::vector<double> plain = run(false, &plain_stats);
+  const std::vector<double> verified = run(true, &verified_stats);
+
+  ASSERT_EQ(plain.size(), verified.size());
+  for (std::size_t k = 0; k < plain.size(); ++k) {
+    EXPECT_EQ(plain[k], verified[k]) << "node " << k;
+  }
+  EXPECT_EQ(plain_stats.iterations, verified_stats.iterations);
+  EXPECT_EQ(plain_stats.cuts_added, verified_stats.cuts_added);
+  EXPECT_GT(verified_stats.screen_verified, 0)
+      << "the screen certified nothing, so nothing was verified";
+  GTEST_LOG_(INFO) << "screen certified and re-verified "
+                   << verified_stats.screen_verified << " regions against "
+                   << plain_stats.subproblems_solved << " subproblems solved";
+}
+
 TEST(barycentric_block_system, block_psi_rows_are_gauge_free_and_local) {
   cddwrap::global_init();
   defer _ = &cddwrap::global_free;

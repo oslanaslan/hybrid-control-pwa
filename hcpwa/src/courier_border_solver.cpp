@@ -39,6 +39,13 @@ constexpr double kHighsSmallMatrixValue = 1e-9;
 // O(n_max), not by 1e-5.
 constexpr double kDualIdentityTol = 1e-4;
 
+// verify_screen compares the subproblem's zeta* against the screen value,
+// which bounds it from above in exact arithmetic. The LP is optimal only to
+// kHighsSolutionTol, so the gate sits above that, at the same margin as the
+// dual identities; what it exists to catch -- a table built for the wrong
+// block or rectangle -- is off by O(1).
+constexpr double kScreenVerifyTol = kDualIdentityTol;
+
 // The mass identities sum one multiplier per row of their family, and each is
 // dual feasible only to kHighsSolutionTol, so the tolerance has to grow with
 // the row count rather than sit at a blanket constant that a larger geometry
@@ -1538,14 +1545,12 @@ std::vector<double> CourierBorderSolver::solve(
     }
   };
 
-  // Violation of one region under one cached courier.
-  auto screen = [&](const CachedCourier& courier,
-                    const std::array<int, kBlockCount>& js, int rho) {
-    double value = 0.0;
-    for (int b = 0; b < kBlockCount; ++b) {
-      value += courier.t_hat[static_cast<std::size_t>(b)][
-          static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
-    }
+  // The five rectangle ids of one region. They depend on the region alone, so
+  // they are computed once per region rather than once per cached courier
+  // tried: a region that no cached courier covers used to redo this for every
+  // one of them.
+  auto regionRects = [&](const std::array<int, kBlockCount>& js) {
+    std::array<int, kSubsystemCount> rects{};
     for (int s = 0; s < kSubsystemCount; ++s) {
       const SourcePlaneSplit& split = data.split[static_cast<std::size_t>(s)];
       const int m1
@@ -1556,8 +1561,23 @@ std::vector<double> CourierBorderSolver::solve(
                 * m1
             + static_cast<std::size_t>(js[static_cast<std::size_t>(
                 split.block[1])]);
+      rects[static_cast<std::size_t>(s)] = data.pair_rect[s][pair];
+    }
+    return rects;
+  };
+
+  // Violation of one region under one cached courier.
+  auto screen = [&](const CachedCourier& courier,
+                    const std::array<int, kBlockCount>& js,
+                    const std::array<int, kSubsystemCount>& rects, int rho) {
+    double value = 0.0;
+    for (int b = 0; b < kBlockCount; ++b) {
+      value += courier.t_hat[static_cast<std::size_t>(b)][
+          static_cast<std::size_t>(js[static_cast<std::size_t>(b)])];
+    }
+    for (int s = 0; s < kSubsystemCount; ++s) {
       const std::size_t rect
-          = static_cast<std::size_t>(data.pair_rect[s][pair]);
+          = static_cast<std::size_t>(rects[static_cast<std::size_t>(s)]);
       value -= courier.d_hat[s][rect * static_cast<std::size_t>(cand_stride)
                                 + static_cast<std::size_t>(
                                     is_upper ? 0 : rho)];
@@ -1701,10 +1721,13 @@ std::vector<double> CourierBorderSolver::solve(
       // Try the cached couriers first, most recently useful one first. Every
       // one of them is a concrete feasible courier, so a hit certifies this
       // region outright.
+      const std::array<int, kSubsystemCount> rects = regionRects(js);
       bool covered = false;
+      double screen_value = 0.0;
       for (std::size_t tries = 0; tries < cache.size(); ++tries) {
         const std::size_t at = (last_hit + tries) % cache.size();
-        if (screen(cache[at], js, rho) <= options_.certificate_tol) {
+        screen_value = screen(cache[at], js, rects, rho);
+        if (screen_value <= options_.certificate_tol) {
           last_hit = at;
           covered = true;
           break;
@@ -1712,6 +1735,27 @@ std::vector<double> CourierBorderSolver::solve(
       }
       if (covered) {
         ++screened;
+        if (options_.verify_screen) {
+          // The screen value is the phase-I optimum over (d, zeta) at the
+          // cached slopes -- with the offsets pushed to their bounds and the
+          // vertex maximum taken block by block -- so the true zeta*, which
+          // also minimises over the slopes, cannot exceed it. Both halves are
+          // checked: the LP agrees the region is certified, and it does not
+          // beat the bound. The result is not used, so the run is unchanged.
+          const SubproblemResult check = solveRegionSubproblem(
+              impl, data, tgt, js, sigma, z,
+              [&](int s, int e) { return targetValue(j, s, e); },
+              /*want_duals=*/false, /*verbose=*/false);
+          ++local_stats.screen_verified;
+          if (check.zeta > options_.certificate_tol
+              || check.zeta > std::max(0.0, screen_value) + kScreenVerifyTol) {
+            throw std::runtime_error(std::format(
+                "CourierBorderSolver::solve: the screen certified region {} "
+                "with value {:.3e}, but its subproblem has zeta* = {:.3e} "
+                "(certificate_tol {:.3e})",
+                j, screen_value, check.zeta, options_.certificate_tol));
+          }
+        }
         continue;
       }
 

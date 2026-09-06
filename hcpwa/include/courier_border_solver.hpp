@@ -76,6 +76,14 @@ struct CourierBorderOptions {
   // concrete feasible courier for it has been exhibited.
   int max_certificate_cache = 64;
 
+  // Diagnostic. Also solve the subproblem of every region the screen
+  // certified and check the two facts the screen rests on: zeta* is within
+  // certificate_tol, and zeta* is no larger than the screen's own value,
+  // which is the phase-I optimum over (d, zeta) at the cached courier's
+  // slopes. Costs one subproblem per screened region -- it undoes the whole
+  // saving -- so it is for tests and probes only. A failure throws.
+  bool verify_screen = false;
+
   // Safety factor on the data-derived master column box.
   double master_box_scale = 8.0;
 
@@ -92,6 +100,8 @@ struct CourierBorderStats {
   int iterations = 0;
   long long cuts_added = 0;
   long long subproblems_solved = 0;
+  // Regions the screen certified that verify_screen re-solved and confirmed.
+  long long screen_verified = 0;
   double worst_zeta = 0.0;
   double master_objective = 0.0;
   bool master_hit_box = false;

@@ -405,6 +405,42 @@ TEST(courier_border_lp, certificate_screen_changes_nothing_but_the_work) {
       << "the screen skipped nothing, so this test compared nothing";
 }
 
+// The screen rests on one inequality: the value it computes for a cached
+// courier is the phase-I optimum over (d, zeta) at that courier's slopes, so
+// it can only overestimate the region's true zeta*. verify_screen re-solves
+// every screened region and throws if the LP disagrees on either count. This
+// has to pass, and it has to have verified something.
+TEST(courier_border_lp, screen_value_bounds_the_subproblem_optimum) {
+  cddwrap::global_init();
+  defer _ = &cddwrap::global_free;
+
+  const Fixture f = makeFixture();
+
+  std::vector<double> a = constantCandidate(f.layouts[1], 2.0);
+  for (int k = 0; k < f.layouts[1].eta_s[0]; ++k) {
+    a[static_cast<std::size_t>(f.layouts[1].idxX(0, k))] += 0.45 * k;
+  }
+  const std::vector<std::vector<double>> cands = {a};
+
+  CourierBorderRequest req;
+  req.target_phase = 0;
+  req.source_phase = 1;
+  req.candidates = cands;
+
+  CourierBorderOptions opts;
+  opts.max_seed_rows = 0;
+  opts.max_certificate_cache = 64;
+  opts.verify_screen = true;
+  CourierBorderSolver solver{opts};
+  solver.prepare(f.geometries, f.layouts, f.node_weights, kN);
+
+  CourierBorderStats stats;
+  const std::vector<double> z = solver.solve(req, ApproximationMode::Lower, &stats);
+  EXPECT_EQ(static_cast<int>(z.size()), f.layouts[0].num_x);
+  EXPECT_GT(stats.screen_verified, 0)
+      << "the screen certified nothing, so nothing was verified";
+}
+
 // Failure must be loud. run() writes whatever comes back straight into the
 // value function and marches on it, so a partial result would poison the whole
 // backward sweep.

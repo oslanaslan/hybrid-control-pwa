@@ -107,18 +107,50 @@ struct SimplexAttempt {
   double solution_tol = kHighsSolutionTol;
 };
 
-bool solveWithFallback(Highs& highs, std::span<const SimplexAttempt> ladder,
+// A HiGHS instance kept alive across solves.
+//
+// The region subproblem has 19 columns; its simplex is microseconds. What the
+// production run actually spent its time on was the scaffolding around it --
+// constructing Highs, resetting every option and rebuilding the model, once per
+// region. Measured on the server at 32 threads, a subproblem cost 0.96 ms
+// against 185 us single-threaded, because that scaffolding is allocation
+// traffic and 32 threads of it saturate memory bandwidth.
+//
+// Reuse must not change a single answer, so the model and the solver state are
+// both cleared between solves; only the option table survives, and only while
+// the ladder rung it was set for is unchanged. An arena is never shared between
+// threads: each solve() call owns its own.
+struct SolverArena {
+  Highs highs;
+  // Ladder rung whose options are currently loaded, -1 when none are.
+  int rung = -1;
+  bool verbose = false;
+};
+
+bool solveWithFallback(SolverArena& arena, std::span<const SimplexAttempt> ladder,
                        bool verbose, int num_cols, const double* cost,
                        const double* col_lower, const double* col_upper,
                        int num_rows, const double* row_lower,
                        const double* row_upper, int num_nz, const int* starts,
                        const int* index, const double* value,
                        HighsStatus* last_status, int* rung_out = nullptr) {
+  Highs& highs = arena.highs;
   int rung = 0;
   for (const SimplexAttempt& attempt : ladder) {
-    highs.clear();
-    applyHighsOptions(highs, verbose, attempt.presolve, attempt.strategy,
-                      attempt.solution_tol);
+    // clearModel + clearSolver is clear() without the option reset: the model
+    // and every trace of the previous solve go, so no basis is carried into
+    // the next region, but the option table stays and is only rewritten when
+    // the rung changes.
+    highs.clearModel();
+    highs.clearSolver();
+    if (arena.rung != rung || arena.verbose != verbose) {
+      applyHighsOptions(highs, verbose, attempt.presolve, attempt.strategy,
+                        attempt.solution_tol);
+      arena.rung = rung;
+      arena.verbose = verbose;
+    } else {
+      highs.changeObjectiveSense(ObjSense::kMinimize);
+    }
     // Loading the model is structural: no simplex setting fixes a rejected
     // matrix, so it throws rather than moving to the next rung.
     if (highs.addCols(num_cols, cost, col_lower, col_upper, 0, nullptr, nullptr,
@@ -722,7 +754,7 @@ SubproblemResult solveRegionSubproblem(
     const std::array<int, kBlockCount>& js, double sigma,
     const std::vector<double>& z,
     const std::function<double(int, int)>& target_value, bool want_duals,
-    bool verbose) {
+    bool verbose, SolverArena& arena) {
   const double kInf = std::numeric_limits<double>::infinity();
 
   std::vector<int> sstart = {0};
@@ -841,9 +873,8 @@ SubproblemResult solveRegionSubproblem(
       = want_duals ? std::span<const SimplexAttempt>(kSubLadderDuals)
                    : std::span<const SimplexAttempt>(kSubLadderNoDuals);
 
-  Highs sub;
   HighsStatus run_status = HighsStatus::kError;
-  if (!solveWithFallback(sub, kSubLadder, verbose, kSubCols, sobj.data(),
+  if (!solveWithFallback(arena, kSubLadder, verbose, kSubCols, sobj.data(),
                          sclo.data(), schi.data(),
                          static_cast<int>(slower.size()), slower.data(),
                          supper.data(), static_cast<int>(svalue.size()),
@@ -852,7 +883,7 @@ SubproblemResult solveRegionSubproblem(
     // Rebuild the same model with logging on: a subproblem that defeats every
     // rung is rare and worth explaining once rather than reporting as a bare
     // status code.
-    Highs loud;
+    SolverArena loud;
     HighsStatus ignored = HighsStatus::kError;
     static constexpr std::array<SimplexAttempt, 1> kLoud
         = {SimplexAttempt{false, 1}};
@@ -866,10 +897,11 @@ SubproblemResult solveRegionSubproblem(
         "optimal after {} attempts; run status {}, model status {}, rows {}, "
         "columns {}",
         js[0], js[1], js[2], kSubLadder.size(), static_cast<int>(run_status),
-        static_cast<int>(sub.getModelStatus()), slower.size(), kSubCols));
+        static_cast<int>(arena.highs.getModelStatus()), slower.size(),
+        kSubCols));
   }
 
-  const auto& ssol = sub.getSolution();
+  const auto& ssol = arena.highs.getSolution();
   out.zeta = ssol.col_value[static_cast<std::size_t>(kSubZetaCol)];
   for (int k = 0; k < kSubCols; ++k) {
     out.primal[static_cast<std::size_t>(k)]
@@ -1589,6 +1621,10 @@ std::vector<double> CourierBorderSolver::solve(
   cache.reserve(static_cast<std::size_t>(
       std::max(0, options_.max_certificate_cache)));
 
+  // One HiGHS instance for every region subproblem of this solve. solve() runs
+  // on a single thread, so the arena is never shared.
+  SolverArena sub_arena;
+
   CourierBorderStats local_stats;
 
   // A sweep may stop as soon as it has collected enough cuts, and the next one
@@ -1625,7 +1661,7 @@ std::vector<double> CourierBorderSolver::solve(
         = {SimplexAttempt{true, 2}, SimplexAttempt{true, 1},
            SimplexAttempt{false, 4}, SimplexAttempt{true, 0, 1e-4}};
 
-    Highs master;
+    SolverArena master;
     HighsStatus master_status = HighsStatus::kError;
     if (!solveWithFallback(
             master, kMasterLadder, options_.highs_verbose, n_cols, obj.data(),
@@ -1639,11 +1675,11 @@ std::vector<double> CourierBorderSolver::solve(
           "attempts at iteration {}; run status {}, model status {}, rows {}, "
           "columns {}",
           kMasterLadder.size(), iter, static_cast<int>(master_status),
-          static_cast<int>(master.getModelStatus()), row_lower.size(),
+          static_cast<int>(master.highs.getModelStatus()), row_lower.size(),
           n_cols));
     }
 
-    const auto& sol = master.getSolution();
+    const auto& sol = master.highs.getSolution();
     // How far the master actually moved. A cutting-plane loop that adds
     // separating cuts every iteration and still returns the same point is
     // stalled, not converging slowly, and the two look identical in a log that
@@ -1658,7 +1694,7 @@ std::vector<double> CourierBorderSolver::solve(
     }
     // Back on the caller's scale: the objective is a pure linear form in z with
     // no constant term, so undoing the normalisation is exact.
-    local_stats.master_objective = master.getObjectiveValue() * obj_scale;
+    local_stats.master_objective = master.highs.getObjectiveValue() * obj_scale;
     local_stats.master_hit_box = false;
     for (int i = 0; i < n_cols; ++i) {
       if (std::abs(std::abs(z[static_cast<std::size_t>(i)]) - box) < 1e-6) {
@@ -1745,7 +1781,7 @@ std::vector<double> CourierBorderSolver::solve(
           const SubproblemResult check = solveRegionSubproblem(
               impl, data, tgt, js, sigma, z,
               [&](int s, int e) { return targetValue(j, s, e); },
-              /*want_duals=*/false, /*verbose=*/false);
+              /*want_duals=*/false, /*verbose=*/false, sub_arena);
           ++local_stats.screen_verified;
           if (check.zeta > options_.certificate_tol
               || check.zeta > std::max(0.0, screen_value) + kScreenVerifyTol) {
@@ -1762,7 +1798,7 @@ std::vector<double> CourierBorderSolver::solve(
       const SubproblemResult sub = solveRegionSubproblem(
           impl, data, tgt, js, sigma, z,
           [&](int s, int e) { return targetValue(j, s, e); },
-          /*want_duals=*/true, /*verbose=*/false);
+          /*want_duals=*/true, /*verbose=*/false, sub_arena);
       ++local_stats.subproblems_solved;
 
       if (sub.zeta <= options_.certificate_tol) {
@@ -2127,6 +2163,7 @@ double CourierBorderSolver::worstCertificateResidual(
   }
 
   double worst = 0.0;
+  SolverArena arena;
   for (int j = 0; j < n_regions; ++j) {
     const std::array<int, kBlockCount> js = impl.decodeRegion(tgt, j);
     // Same candidate solve() would pick. Soundness only needs a courier for
@@ -2150,7 +2187,7 @@ double CourierBorderSolver::worstCertificateResidual(
 
     const SubproblemResult sub = solveRegionSubproblem(
         impl, data, tgt, js, sigma, z, target_value, /*want_duals=*/false,
-        /*verbose=*/false);
+        /*verbose=*/false, arena);
     worst = std::max(worst, sub.zeta);
   }
   return worst;

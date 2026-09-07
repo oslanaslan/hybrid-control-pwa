@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <fstream>
 #include <mutex>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -131,6 +133,11 @@ class ValueFunction {
     void dumpToJson(const std::string& filepath) const {
         std::lock_guard<std::mutex> lock(mut_);
         std::ostringstream out;
+        // Default stream precision is six significant digits, which silently
+        // rounds every node value on the way out: the artifact stopped being
+        // the thing the run computed. max_digits10 is the shortest form that
+        // reads back bit-identical.
+        out << std::setprecision(std::numeric_limits<double>::max_digits10);
         out << '{';
         bool first_phase = true;
         for (const auto& [phase, level] : data_) {
@@ -166,6 +173,7 @@ class ValueFunction {
 inline void dumpVectorToJson(const std::vector<double>& vec,
                             const std::string& filepath) {
     std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<double>::max_digits10);
     out << '[';
     for (std::size_t i = 0; i < vec.size(); ++i) {
         if (i > 0) {

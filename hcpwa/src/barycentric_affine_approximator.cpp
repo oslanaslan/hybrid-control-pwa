@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iomanip>
 #include <future>
 #include <limits>
 #include <numeric>
@@ -1992,6 +1993,31 @@ void BarycentricAffineApproximator::run(const std::string& output_folder_path,
   logger_->info("Saving barycentric value function artifacts to {}", base.string());
   value_function_.dumpToJson((base / "value_function.json").string());
   hcpwa::util::dumpVectorToJson(t_range_, (base / "t_range.json").string());
+  // The quadrature weights belong with the value function, because without
+  // them it cannot be read. A node value is a coefficient against a basis whose
+  // numbering comes out of the cdd vertex dedup, so it is specific to the run
+  // that produced it: weights taken from another build turn q^T z -- the one
+  // gauge-invariant statistic of z -- into a number that means nothing, while
+  // still looking like a plausible value function. That cost this project a
+  // long detour, with the mismatch read as a violated border condition.
+  {
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<double>::max_digits10) << '{';
+    for (int phase = 0; phase < kPhases; ++phase) {
+      const Eigen::VectorXd& q = node_weights_[static_cast<std::size_t>(phase)];
+      out << (phase ? ",\"" : "\"") << phase << "\":[";
+      for (int i = 0; i < q.size(); ++i) {
+        out << (i ? "," : "") << q(i);
+      }
+      out << ']';
+    }
+    out << '}';
+    std::ofstream f((base / "weights.json").string());
+    if (!f) {
+      throw std::runtime_error("run: cannot open weights.json for writing");
+    }
+    f << out.str();
+  }
   dumpInitParamsToJson((base / "init_params.json").string());
   logger_->info("Finished barycentric affine approximator run");
 }

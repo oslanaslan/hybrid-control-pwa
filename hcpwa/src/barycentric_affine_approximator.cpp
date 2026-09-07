@@ -1238,10 +1238,22 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
   if (validate_) {
     const double residual = courier_solver_.worstCertificateResidual(
         request, approximation_mode_, x_boundary);
-    if (residual > kResidualValidationTol) {
-      throw std::runtime_error(
+    // Against the courier's own certificate_tol, not the band's tolerance.
+    // The transfer step is asked to drive every region's phase-I objective
+    // below certificate_tol and stops there by construction, so re-deriving it
+    // and then demanding kResidualValidationTol -- a hundred times tighter --
+    // rejects correct answers: a level-1 node of a T=50 run re-verified at
+    // 5.9e-3, well inside its 1e-2 certificate and well outside 1e-4. The
+    // margin absorbs the fact that the two passes solve the same subproblems
+    // through different HiGHS calls.
+    const double limit = courier_options_.certificate_tol
+                         + kResidualValidationTol;
+    if (residual > limit) {
+      throw std::runtime_error(std::format(
           "getBorderConditions: independent re-verification failed, worst "
-          "certificate residual " + std::to_string(residual));
+          "certificate residual {:.6e} against a limit of {:.6e} "
+          "(certificate_tol {:.1e})",
+          residual, limit, courier_options_.certificate_tol));
     }
   }
 

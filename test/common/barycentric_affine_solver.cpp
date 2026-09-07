@@ -213,6 +213,12 @@ TEST(common, barycentric_affine_solver) {
   barycentric_approximator.setBandLpOptions(band_lp_options());
   // Levels beyond this are skipped. The full horizon is ceil(t_max / tau_min)
   // = 120; capping it is how a staged run is done.
+  // Turns on the independent re-derivation of every border condition: each
+  // node's courier answer is re-certified region by region instead of being
+  // trusted. Roughly doubles the cost of a node, so it is off by default and
+  // meant for validating a configuration, not for production.
+  barycentric_approximator.setValidate(envInt("HCPWA_VALIDATE", 0) != 0);
+
   const int max_switches = envInt("HCPWA_MAX_SWITCHES", -1);
   if (max_switches >= 0) {
     barycentric_approximator.setMaxSwitches(max_switches);

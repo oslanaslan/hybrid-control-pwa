@@ -1233,6 +1233,61 @@ std::vector<double> BarycentricAffineApproximator::getBorderConditions(
       stats.subproblems_solved, stats.worst_zeta, stats.master_objective,
       stats.master_hit_box);
 
+  // Unconditional necessary condition on the integral, at the cost of two dot
+  // products. The border condition is V~ <= max_rho Phi_rho pointwise, so
+  // integrating gives I(V~) <= I(max_rho Phi_rho). With a single candidate the
+  // max is that candidate and the test is exact; with several, the integral of
+  // the max is at least the max of the integrals, so exceeding max_c I(c) is
+  // possible for a correct answer and only worth reporting.
+  //
+  // This is not redundant with the full re-derivation below: that one costs a
+  // pass over all M regions and is therefore off in production, which is how a
+  // T=50 run on 32 threads came to store a level-1 node whose integral exceeded
+  // its only candidate's by 6.4% -- an independent residual of 43.7 against a
+  // 1e-2 certificate -- and still reported PASSED.
+  {
+    const Eigen::VectorXd& q_tgt
+        = node_weights_[static_cast<std::size_t>(target_phase)];
+    const Eigen::VectorXd& q_src
+        = node_weights_[static_cast<std::size_t>(source_phase)];
+    double integral_target = 0.0;
+    for (int i = 0; i < q_tgt.size(); ++i) {
+      integral_target += q_tgt(i) * x_boundary[static_cast<std::size_t>(i)];
+    }
+    double integral_best = -std::numeric_limits<double>::infinity();
+    for (const std::vector<double>& c : candidates) {
+      double v = 0.0;
+      for (int i = 0; i < q_src.size(); ++i) {
+        v += q_src(i) * c[static_cast<std::size_t>(i)];
+      }
+      integral_best = std::max(integral_best, v);
+    }
+    // A pointwise slack of certificate_tol lifts the mean by at most the same,
+    // and |Omega| turns the mean back into the integral the dots produce.
+    const double omega_volume = std::pow(system_params_.N, kSpaceDim);
+    const double slack
+        = (courier_options_.certificate_tol + kResidualValidationTol)
+          * omega_volume;
+    if (integral_target > integral_best + slack) {
+      const std::string detail = std::format(
+          "integral of the estimate {:.6e} exceeds the best candidate's "
+          "{:.6e} by {:.3e} (slack {:.3e}), target_phase {}, theta_idx {}, "
+          "switch_cnt {}, candidates {}",
+          integral_target, integral_best, integral_target - integral_best,
+          slack, target_phase, theta_idx, switch_cnt, candidates.size());
+      if (candidates.size() == 1) {
+        // Necessary: with one candidate the pointwise bound integrates to this
+        // one exactly, so failing it means the returned z is not a bound.
+        throw std::runtime_error(
+            "getBorderConditions: border condition violated -- " + detail);
+      }
+      logger_->warn(
+          "getBorderConditions: {} -- possible with several candidates, since "
+          "the integral of their maximum can exceed every single one, but "
+          "worth checking", detail);
+    }
+  }
+
   // Opt-in independent re-derivation: rebuilds every region's courier from
   // scratch rather than trusting the loop that produced x_boundary.
   if (validate_) {
